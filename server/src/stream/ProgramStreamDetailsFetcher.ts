@@ -40,6 +40,31 @@ import type {
 import { FileStreamSource, HttpStreamSource } from './types.ts';
 import { extractIsAnamorphic } from './util.ts';
 
+// Cover art is stored as a video stream. Rows scanned before the attached
+// picture disposition was persisted carry null, and null must not count as a
+// confirmed real video: before this column existed the local probe stored the
+// cover as the file's only video stream, so a copy mapping of 0:V:0 against it
+// matches nothing. ffprobe reports cover art with an image codec, which is the
+// tiebreak for unknown rows until a rescan records the disposition.
+const ImageVideoCodecs = new Set([
+  'mjpeg',
+  'png',
+  'bmp',
+  'gif',
+  'webp',
+  'tiff',
+]);
+
+export function isAttachedPictureStream(stream: {
+  hasAttachedPicture?: boolean | null;
+  codec?: string | null;
+}): boolean {
+  return (
+    stream.hasAttachedPicture ??
+    ImageVideoCodecs.has((stream.codec ?? '').toLowerCase())
+  );
+}
+
 @injectable()
 export class ProgramStreamDetailsFetcher {
   @InjectLogger() declare private readonly logger: Logger;
@@ -86,7 +111,7 @@ export class ProgramStreamDetailsFetcher {
       `${firstVersion.width}/${firstVersion.height}`;
     const videoStreamDetails =
       streamsByType['video']
-        ?.filter((stream) => !stream.hasAttachedPicture)
+        ?.filter((stream) => !isAttachedPictureStream(stream))
         .map(
           (videoStream) =>
             ({
@@ -110,7 +135,7 @@ export class ProgramStreamDetailsFetcher {
               pixelFormat: nullToUndefined(videoStream.pixelFormat),
               bitrate: nullToUndefined(videoStream.bitrate),
               statisticsBitrate: nullToUndefined(videoStream.statisticsBitrate),
-              isAttachedPic: videoStream.hasAttachedPicture ?? false,
+              isAttachedPic: isAttachedPictureStream(videoStream),
               colorRange: videoStream.colorRange ?? undefined,
               colorSpace: videoStream.colorSpace ?? undefined,
               colorTransfer: videoStream.colorTransfer ?? undefined,

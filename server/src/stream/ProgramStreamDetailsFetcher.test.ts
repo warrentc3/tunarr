@@ -363,6 +363,51 @@ describe('ProgramStreamDetailsFetcher', () => {
       expect(result.get().streamDetails.videoDetails?.[0]?.streamIndex).toBe(1);
       expect(probeSourceBitrate).not.toHaveBeenCalled();
     });
+
+    it('treats an unknown disposition on an image-codec stream as cover art (rows scanned before the column existed)', async () => {
+      const program = makeProgram('local', 'unused');
+      const version = program.versions[0];
+      const realVideo = version?.mediaStreams[0];
+      if (!version || !realVideo) throw new Error('fixture has no video');
+      version.mediaStreams = [
+        { ...realVideo, index: 0, codec: 'mjpeg', hasAttachedPicture: null },
+        { ...realVideo, index: 1, codec: 'h264', hasAttachedPicture: null },
+      ];
+      const fetcher = new ProgramStreamDetailsFetcher(
+        makeProgramDB(program),
+        ffmpegInfo,
+        makeArtworkService(),
+      );
+      const result = await fetcher.getStream({
+        server: makeServer({ type: 'local', uri: '' }),
+        lineupItem: { uuid: program.uuid } as StreamLineupProgram,
+      });
+      expect(result.get().streamDetails.videoDetails).toHaveLength(1);
+      expect(result.get().streamDetails.videoDetails?.[0]?.streamIndex).toBe(1);
+    });
+
+    it('leaves a legacy music file with only cover art as audio-only', async () => {
+      const program = makeProgram('local', 'unused');
+      const version = program.versions[0];
+      const realVideo = version?.mediaStreams[0];
+      if (!version || !realVideo) throw new Error('fixture has no video');
+      version.mediaStreams = [
+        { ...realVideo, index: 0, codec: 'mjpeg', hasAttachedPicture: null },
+        ...version.mediaStreams.filter(
+          (stream) => stream.streamKind !== 'video',
+        ),
+      ];
+      const fetcher = new ProgramStreamDetailsFetcher(
+        makeProgramDB(program),
+        ffmpegInfo,
+        makeArtworkService(),
+      );
+      const result = await fetcher.getStream({
+        server: makeServer({ type: 'local', uri: '' }),
+        lineupItem: { uuid: program.uuid } as StreamLineupProgram,
+      });
+      expect(result.get().streamDetails.videoDetails).toBeUndefined();
+    });
   });
   describe('getStream constructs valid HTTP URLs for remote streams', () => {
     it('constructs a valid Plex stream URL preserving the http:// protocol', async () => {
