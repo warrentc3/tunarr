@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContentBackedStreamLineupItem } from '../db/derived_types/StreamLineup.ts';
 import type { SubtitleStreamDetails } from '../stream/types.ts';
-import { collectDirectSubtitleRenditions } from './DirectSubtitleRenditions.ts';
+import {
+  collectDirectSubtitleRenditions,
+  isDirectTextSubtitleCodec,
+} from './DirectSubtitleRenditions.ts';
 import {
   createDirectSubtitleSlots,
   fillDirectSubtitleSlots,
@@ -405,4 +408,27 @@ describe('Direct subtitle renditions', () => {
     ]);
     expect(new Set(result.map(({ stream }) => stream.path)).size).toBe(1);
   });
+});
+
+describe('Direct text subtitle codec eligibility', () => {
+  it.each(['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'vtt', 'mov_text', 'text'])(
+    'accepts %s, which FFmpeg 7.1.1 can decode to WebVTT',
+    (codec) => {
+      expect(isDirectTextSubtitleCodec(codec)).toBe(true);
+    },
+  );
+
+  it.each(['ttml', 'hdmv_text_subtitle', 'TTML'])(
+    'rejects %s, which is text but has no decoder in FFmpeg 7.1.1',
+    (codec) => {
+      expect(isDirectTextSubtitleCodec(codec)).toBe(false);
+    },
+  );
+
+  it.each(['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle', 'xsub'])(
+    'rejects image subtitle codec %s',
+    (codec) => {
+      expect(isDirectTextSubtitleCodec(codec)).toBe(false);
+    },
+  );
 });

@@ -6,8 +6,11 @@ import { isNonEmptyString } from '../util/index.ts';
 import { LoggerFactory } from '../util/logging/LoggerFactory.ts';
 import { SubtitleStreamPicker } from './SubtitleStreamPicker.ts';
 
-// FFmpeg's AV_CODEC_PROP_TEXT_SUB descriptors, including the SRT/SSA aliases.
-// This classifies content, not decoder availability. In particular, a .sub
+// FFmpeg's AV_CODEC_PROP_TEXT_SUB descriptors, including the SRT/SSA aliases,
+// restricted to codecs the pinned FFmpeg 7.1.1 can decode to WebVTT. The
+// single Direct v2 process aborts on any subtitle input it cannot decode, so a
+// text codec without a decoder must not fill a slot: `ttml` has an encoder but
+// no decoder or demuxer, and `hdmv_text_subtitle` has neither. A .sub
 // extension alone cannot distinguish a text file from bitmap subtitles.
 // https://github.com/FFmpeg/FFmpeg/blob/n7.1.1/libavcodec/codec_desc.c
 const textSubtitleCodecs = new Set([
@@ -30,8 +33,6 @@ const textSubtitleCodecs = new Set([
   'vplayer',
   'pjs',
   'ass',
-  'hdmv_text_subtitle',
-  'ttml',
 ]);
 
 export function isDirectTextSubtitleCodec(codec: string): boolean {
