@@ -372,6 +372,14 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
   }
 
   private async pruneNativeSegments(videoSequence: number) {
+    // FFmpeg's rolling window retires a segment on its own schedule. A
+    // client that is still reading an older segment (paused, buffering, on a
+    // slow link) must keep it, as legacy HLS does through its request floor.
+    const requestedVideo = this.minSegmentRequested;
+    const videoFloor =
+      requestedVideo > 0
+        ? Math.min(videoSequence, requestedVideo)
+        : videoSequence;
     const floors = new Map<string, number>();
     for (const slot of this.#directSubtitleSlots) {
       const lines = await this.readSubtitlePlaylist(slot.playlistName);
@@ -379,7 +387,13 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       const repaired = this.nativePlaylistResult(
         this.#nativePlaylistBridge.repairSubtitles(slot.playlistName, lines),
       );
-      floors.set(slot.segmentPrefix, repaired.sequence);
+      const requested = this.minSubtitleSegmentRequestedFor(slot.id);
+      floors.set(
+        slot.segmentPrefix,
+        requested > 0
+          ? Math.min(repaired.sequence, requested)
+          : repaired.sequence,
+      );
     }
     const files = await fs.readdir(this._workingDirectory);
     const now = Date.now();
@@ -390,7 +404,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       this.#nativeMaxPlaylistDurationMs + this.#nativeMaxSegmentDurationMs;
     for (const filename of files) {
       const video = /^data(\d+)\.(ts|mp4)$/.exec(filename);
-      let expired = video !== null && Number(video[1]) < videoSequence;
+      let expired = video !== null && Number(video[1]) < videoFloor;
       if (!expired && filename.endsWith('.vtt')) {
         for (const [prefix, floor] of floors) {
           const suffix = filename.startsWith(prefix)

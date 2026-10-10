@@ -756,6 +756,33 @@ describe('HlsSession', () => {
       },
     );
 
+    test('keeps segments a client is still reading even after FFmpeg rolled them out', async () => {
+      await writePlaylist('stream.m3u8', 10, 2, videoName);
+      await writePlaylist(slot.playlistName, 10, 2, subtitleName);
+      for (const name of [
+        videoName(3),
+        videoName(5),
+        subtitleName(3),
+        subtitleName(5),
+      ]) {
+        await fs.writeFile(
+          path.join(session.workingDirectory, name),
+          'segment',
+        );
+      }
+      // A paused or slow client whose last requests were segment 5.
+      session.onSegmentRequested('10.0.0.9', videoName(5));
+      session.onSegmentRequested('10.0.0.9', subtitleName(5));
+
+      await prune(10, 0);
+      await prune(10, 600);
+      const files = await fs.readdir(session.workingDirectory);
+      expect(files).toContain(videoName(5));
+      expect(files).toContain(subtitleName(5));
+      expect(files).not.toContain(videoName(3));
+      expect(files).not.toContain(subtitleName(3));
+    });
+
     test('restarts retirement when a previously retired URI is served again', async () => {
       await writePlaylist('stream.m3u8', 0, 20, videoName);
       const filename = path.join(session.workingDirectory, videoName(0));
