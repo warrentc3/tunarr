@@ -1,17 +1,35 @@
+export type NativeSubtitlePlaylist = {
+  playlistName: string;
+  /** Filename stem FFmpeg derives its WebVTT segment names from. */
+  segmentPrefix: string;
+};
+
 /**
  * Repairs FFmpeg 7's HLS restart metadata without selecting or rebuilding its
  * media windows. FFmpeg owns every entry, URI number, duration and timestamp.
  */
 export class HlsNativePlaylistBridge {
   private subtitleUris = new Map<string, Map<number, string>>();
+  private segmentPrefixes = new Map<string, string>();
   private sequenceFloors = new Map<string, number>([['stream.m3u8', 0]]);
   private discontinuities = new Set<number>();
   private retiredDiscontinuities = 0;
 
-  constructor(subtitlePlaylists: readonly string[]) {
-    for (const name of subtitlePlaylists) {
-      this.subtitleUris.set(name, new Map());
-      this.sequenceFloors.set(name, 0);
+  constructor(subtitlePlaylists: readonly (string | NativeSubtitlePlaylist)[]) {
+    for (const playlist of subtitlePlaylists) {
+      const { playlistName, segmentPrefix } =
+        typeof playlist === 'string'
+          ? {
+              playlistName: playlist,
+              // Direct slot playlists are subtitle_<id>.m3u8 and their
+              // discard-side AV playlist subtitle_<id>_av_.m3u8, whose stem
+              // hlsenc uses for the WebVTT segment names.
+              segmentPrefix: `${playlist.replace(/\.m3u8$/, '')}_av_`,
+            }
+          : playlist;
+      this.subtitleUris.set(playlistName, new Map());
+      this.segmentPrefixes.set(playlistName, segmentPrefix);
+      this.sequenceFloors.set(playlistName, 0);
     }
   }
 
@@ -43,7 +61,9 @@ export class HlsNativePlaylistBridge {
 
   repairSubtitles(name: string, lines: readonly string[]): string[] {
     const knownUris = this.subtitleUris.get(name);
-    if (!knownUris) throw new Error('Unregistered native subtitle playlist');
+    const segmentPrefix = this.segmentPrefixes.get(name);
+    if (!knownUris || segmentPrefix === undefined)
+      throw new Error('Unregistered native subtitle playlist');
     let sequence = this.sequence(lines);
     let inEntry = false;
     const currentUris = new Map<number, string>();
@@ -52,12 +72,16 @@ export class HlsNativePlaylistBridge {
         inEntry = true;
       } else if (inEntry && line.trim() && !line.startsWith('#')) {
         const uri = line.trim();
-        const previous = knownUris.get(sequence);
         const isLostUri = uri === '.' || uri.endsWith('/.');
-        if (isLostUri && previous === undefined) {
-          throw new Error('Native subtitle restart lost an unknown URI');
-        }
-        const restored = isLostUri ? previous! : line;
+        // hlsenc numbers every WebVTT segment with its media sequence under
+        // the AV playlist stem, so an inherited entry FFmpeg rewrote to '.'
+        // is exactly <base><prefix><sequence>.vtt. The snapshot taken before
+        // the restart is preferred when present; the derivation covers a
+        // snapshot that was missed, instead of failing the rendition.
+        const restored = isLostUri
+          ? (knownUris.get(sequence) ??
+            `${uri.slice(0, uri.length - 1)}${segmentPrefix}${sequence}.vtt`)
+          : line;
         currentUris.set(sequence++, restored);
         inEntry = false;
         return restored;

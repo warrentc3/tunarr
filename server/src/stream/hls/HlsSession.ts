@@ -356,8 +356,15 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
         );
         const now = dayjs();
         if (now.isAfter(this.#lastDelete.add(30, 'seconds'))) {
-          await this.pruneNativeSegments(result.sequence);
+          // The video playlist is already repaired. Pruning touches every
+          // slot playlist and the directory; its failure must not turn a
+          // valid variant playlist into a 500, nor repeat on every request.
           this.#lastDelete = now;
+          try {
+            await this.pruneNativeSegments(result.sequence);
+          } catch (error) {
+            this.logger.error(error, 'Native segment pruning failed');
+          }
         }
         return result;
       }),
@@ -437,7 +444,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       );
       this.#currentDirectSubtitleRenditions = [...this.#directSubtitleSlots];
       this.#nativePlaylistBridge = new HlsNativePlaylistBridge(
-        this.#directSubtitleSlots.map((slot) => slot.playlistName),
+        this.#directSubtitleSlots,
       );
     }
 
@@ -652,23 +659,34 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
           ? async (session, renditions) => {
               return this.#subtitlePlaylistLock.runExclusive(async () => {
                 if (this.state !== 'started') return false;
-                const previousVideo = await this.readPlaylist();
-                if (previousVideo) {
-                  this.#nativePlaylistBridge.repairVideo(previousVideo);
-                  // Every producer, including an error replacement, snapshots
-                  // finalized native URIs before FFmpeg's append reader loses them.
-                  for (const slot of this.#directSubtitleSlots) {
-                    const previous = await this.readSubtitlePlaylist(
-                      slot.playlistName,
-                    );
-                    if (previous)
-                      this.#nativePlaylistBridge.repairSubtitles(
+                // Every producer, including an error replacement, snapshots
+                // the finalized native playlists before FFmpeg's append reader
+                // rewrites inherited subtitle URIs. The bridge can derive a
+                // lost URI without the snapshot, so a read failure here must
+                // not reject the start and silently drop the programme while
+                // the channel clock has already advanced past it.
+                try {
+                  const previousVideo = await this.readPlaylist();
+                  if (previousVideo) {
+                    this.#nativePlaylistBridge.repairVideo(previousVideo);
+                    for (const slot of this.#directSubtitleSlots) {
+                      const previous = await this.readSubtitlePlaylist(
                         slot.playlistName,
-                        previous,
                       );
+                      if (previous)
+                        this.#nativePlaylistBridge.repairSubtitles(
+                          slot.playlistName,
+                          previous,
+                        );
+                    }
+                    this.#nativePlaylistBridge.beginProgram(
+                      this.#nativePlaylistBridge.nextSequence(previousVideo),
+                    );
                   }
-                  this.#nativePlaylistBridge.beginProgram(
-                    this.#nativePlaylistBridge.nextSequence(previousVideo),
+                } catch (error) {
+                  this.logger.error(
+                    error,
+                    'Could not snapshot native playlists before the next producer',
                   );
                 }
                 if (this.state !== 'started') return false;

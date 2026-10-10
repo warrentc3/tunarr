@@ -128,14 +128,64 @@ describe('HlsNativePlaylistBridge', () => {
     ]);
   });
 
-  test('rejects lost URIs that have no outgoing snapshot instead of inventing an entry', () => {
-    const bridge = new HlsNativePlaylistBridge(['subtitle.m3u8']);
-    expect(() =>
+  test('derives a lost URI from the rendition stem and media sequence when no snapshot exists', () => {
+    const bridge = new HlsNativePlaylistBridge(['subtitle_eng_regular.m3u8']);
+    expect(
+      bridge.repairSubtitles('subtitle_eng_regular.m3u8', [
+        '#EXTM3U',
+        '#EXT-X-MEDIA-SEQUENCE:10',
+        '#EXTINF:4,',
+        '/stream/channels/c/hls_direct_v2/.',
+        '#EXTINF:4,',
+        '/stream/channels/c/hls_direct_v2/subtitle_eng_regular_av_11.vtt',
+      ]),
+    ).toEqual([
+      '#EXTM3U',
+      '#EXT-X-MEDIA-SEQUENCE:10',
+      '#EXT-X-DISCONTINUITY-SEQUENCE:0',
+      '#EXTINF:4,',
+      '/stream/channels/c/hls_direct_v2/subtitle_eng_regular_av_10.vtt',
+      '#EXTINF:4,',
+      '/stream/channels/c/hls_direct_v2/subtitle_eng_regular_av_11.vtt',
+    ]);
+  });
+
+  test('derives a bare lost URI and honours an explicit segment prefix', () => {
+    const bridge = new HlsNativePlaylistBridge([
+      { playlistName: 'subtitle.m3u8', segmentPrefix: 'custom_' },
+    ]);
+    expect(
       bridge.repairSubtitles('subtitle.m3u8', [
         '#EXTM3U',
+        '#EXT-X-MEDIA-SEQUENCE:3',
+        '#EXTINF:4,',
+        '.',
+      ]),
+    ).toContain('custom_3.vtt');
+  });
+
+  test('prefers the snapshot taken before the restart over the derivation', () => {
+    const bridge = new HlsNativePlaylistBridge(['subtitle_eng_regular.m3u8']);
+    bridge.repairSubtitles('subtitle_eng_regular.m3u8', [
+      '#EXTM3U',
+      '#EXT-X-MEDIA-SEQUENCE:10',
+      '#EXTINF:4,',
+      '/served/as-written_10.vtt',
+    ]);
+    expect(
+      bridge.repairSubtitles('subtitle_eng_regular.m3u8', [
+        '#EXTM3U',
+        '#EXT-X-MEDIA-SEQUENCE:10',
         '#EXTINF:4,',
         '/stream/.',
       ]),
-    ).toThrow('unknown URI');
+    ).toContain('/served/as-written_10.vtt');
+  });
+
+  test('still rejects a playlist it was not constructed with', () => {
+    const bridge = new HlsNativePlaylistBridge(['subtitle.m3u8']);
+    expect(() => bridge.repairSubtitles('other.m3u8', ['#EXTM3U'])).toThrow(
+      'Unregistered',
+    );
   });
 });
