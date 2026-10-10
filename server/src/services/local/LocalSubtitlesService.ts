@@ -2,7 +2,7 @@ import { isNonEmptyString } from '@tunarr/shared/util';
 import type { MediaSubtitles } from '@tunarr/types';
 import { injectable } from 'inversify';
 import fs from 'node:fs/promises';
-import { basename, dirname, extname } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { match, P } from 'ts-pattern';
 import type { Nullable } from '../../types/util.ts';
 import type { Logger } from '../../util/logging/LoggerFactory.ts';
@@ -33,10 +33,9 @@ export class LocalSubtitlesService {
         continue;
       }
 
-      const filename = basename(dirent.name, extname(dirent.name));
       const parsedSubtitles = LocalSubtitlesService.parseSubtitleFilePath(
-        itemName,
-        filename,
+        fullItemPath,
+        join(dirname(fullItemPath), dirent.name),
       );
 
       if (!parsedSubtitles) {
@@ -55,7 +54,8 @@ export class LocalSubtitlesService {
   ): Nullable<MediaSubtitles> {
     const itemName = basename(originalItemPath, extname(originalItemPath));
     const fileName = basename(fullPath);
-    const codec = match(extname(fileName))
+    const extension = extname(fileName);
+    const codec = match(extension.toLowerCase())
       .with(P.union('.ssa', '.ass'), () => 'ass')
       .with('.srt', () => 'subrip')
       .with('.vtt', () => 'webvtt')
@@ -65,22 +65,38 @@ export class LocalSubtitlesService {
       return null;
     }
 
-    // Subtitles generally are meant to be in the form {media_name}.{lang}(.{opts})*.{codec_ext}
-    // At this point we've removed the codec_ext and we want to read out the options in the filename
-    // and then derive the language.
-    const [lang = '', ...opts] = fileName
-      .replace(itemName, '')
+    const subtitleName = basename(fileName, extension);
+    if (!subtitleName.startsWith(itemName)) {
+      return null;
+    }
+
+    // Interpret only the suffix after the complete video basename, so a
+    // language or flag in the title is not mistaken for subtitle metadata.
+    const suffix = subtitleName.slice(itemName.length);
+    if (suffix.length > 0 && !/^[.\s_-]/.test(suffix)) {
+      return null;
+    }
+    const tokens = suffix
       .toLowerCase()
-      .split('.')
+      .split(/[.\s_-]+/)
       .filter((s) => s.length > 0);
-
-    const sdh =
-      opts.includes('hi') || opts.includes('cc') || opts.includes('sdh');
-    const forced = opts.includes('forced');
-
-    const maybeLang3T = LanguageService.getAlpha3TCode(
-      lang.split(/[-_]/)?.[0] ?? lang,
+    const languageTokens = tokens.filter(
+      (token) => !['forced', 'sdh', 'cc', 'default'].includes(token),
     );
+    // HI is Hindi when it is the language token; alongside another language
+    // it is the established hearing-impaired filename marker.
+    const lang =
+      languageTokens.find((token) =>
+        isNonEmptyString(LanguageService.normalizeToAlpha3T(token)),
+      ) ??
+      languageTokens[0] ??
+      '';
+    const sdh =
+      tokens.includes('sdh') ||
+      tokens.includes('cc') ||
+      (tokens.includes('hi') && lang !== 'hi');
+    const forced = tokens.includes('forced');
+    const maybeLang3T = LanguageService.normalizeToAlpha3T(lang);
 
     if (isNonEmptyString(maybeLang3T)) {
       return {

@@ -40,19 +40,18 @@ export class SubtitleStreamPicker {
     subtitleStreams: NonEmptyArray<SubtitleStreamDetails>,
     opts: { preferTextBased?: boolean } = {},
   ): Promise<Maybe<SubtitleStreamDetails>> {
+    // Passthrough cannot burn image subtitles into copied video. Remove them
+    // before preference/default selection so they cannot hide usable text.
     const orderedStreams = opts.preferTextBased
-      ? (orderBy(
-          subtitleStreams,
-          (s) => isImageBasedSubtitle(s.codec),
-          'desc',
-        ) as NonEmptyArray<SubtitleStreamDetails>)
+      ? subtitleStreams.filter((stream) => !isImageBasedSubtitle(stream.codec))
       : subtitleStreams;
+    if (orderedStreams.length === 0) return;
     if (subtitlePreferences.length === 0) {
       this.logger.debug(
         'No subtitle preferences for channel. Attempting to use default stream.',
       );
       const defaultStream = orderedStreams.find((stream) => stream.default);
-      const defaultOrFirstStream = defaultStream ?? orderedStreams[0];
+      const defaultOrFirstStream = defaultStream ?? orderedStreams[0]!;
       if (!defaultStream) {
         this.logger.debug('Could not find default subtitle stream');
       }

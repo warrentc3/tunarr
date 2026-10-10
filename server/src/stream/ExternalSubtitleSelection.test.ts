@@ -9,6 +9,7 @@ import type {
 import type { IProgramDB } from '../db/interfaces/IProgramDB.ts';
 import type { MediaSourceWithRelations } from '../db/schema/derivedTypes.ts';
 import { evaluateStreamSelectionProfile } from '../ffmpeg/StreamSelectionEvaluator.ts';
+import type { FfmpegInfo } from '../ffmpeg/ffmpegInfo.ts';
 import type {
   CelEvaluationService,
   StreamSelectionCelContext,
@@ -303,6 +304,7 @@ function makeFetcher(program: StreamLineupProgram) {
   } as unknown as ArtworkService;
   return new ProgramStreamDetailsFetcher(
     makeProgramDB(program),
+    { probeSourceBitrate: vi.fn() } as unknown as FfmpegInfo,
     artworkService,
   );
 }

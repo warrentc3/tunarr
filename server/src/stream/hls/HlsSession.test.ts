@@ -1,5 +1,9 @@
 import type { ISettingsDB } from '@/db/interfaces/ISettingsDB.js';
 import type { ChannelOrmWithTranscodeConfig } from '@/db/schema/derivedTypes.js';
+import type { FfmpegTranscodeSession } from '@/ffmpeg/FfmpegTrancodeSession.js';
+import type { StopOptions } from '@/stream/Session.js';
+import { Result } from '@/types/result.js';
+import dayjs from '@/util/dayjs.js';
 import type { OutputFormat } from '@/ffmpeg/builder/constants.js';
 import type { OnDemandChannelService } from '@/services/OnDemandChannelService.js';
 import type { PlayerContext } from '@/stream/PlayerStreamContext.js';
@@ -9,6 +13,9 @@ import path from 'node:path';
 import tmp from 'tmp';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { ProgramStream } from '../ProgramStream.ts';
+import type { IChannelDB } from '@/db/interfaces/IChannelDB.js';
+import type { FeatureFlagService } from '@/services/FeatureFlagService.js';
+import { createDirectSubtitleSlots } from '../../ffmpeg/DirectSubtitleSlots.ts';
 import { HlsSession } from './HlsSession.js';
 
 vi.mock('@/util/logging/LoggerFactory.js', () => ({
@@ -19,6 +26,8 @@ vi.mock('@/util/logging/LoggerFactory.js', () => ({
       info: vi.fn(),
       trace: vi.fn(),
       warn: vi.fn(),
+      bindings: vi.fn(() => ({})),
+      setBindings: vi.fn(),
     }),
   },
 }));
@@ -28,6 +37,7 @@ vi.mock('@/stream/ConnectionTracker.ts', () => {
     ConnectionTracker: class {
       on = vi.fn();
       recordHeartbeat = vi.fn();
+      cancelCleanup = vi.fn();
       removeStaleConnections = vi.fn(() => []);
     },
   };
@@ -35,14 +45,17 @@ vi.mock('@/stream/ConnectionTracker.ts', () => {
 
 const channelUuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-function makeSession(transcodeDirectory: string): HlsSession {
+function makeSession(
+  transcodeDirectory: string,
+  streamMode: 'hls' | 'hls_direct_v2' = 'hls',
+): HlsSession {
   const channel = {
     uuid: channelUuid,
     transcodeConfig: {},
   } as ChannelOrmWithTranscodeConfig;
 
   const options = {
-    streamMode: 'hls' as const,
+    streamMode,
     initialSegmentCount: 2,
     transcodeDirectory,
   };
@@ -59,7 +72,712 @@ function makeSession(transcodeDirectory: string): HlsSession {
     ) => ProgramStream,
   );
 }
+
+function makeNativeRetentionSession(transcodeDirectory: string): HlsSession {
+  const started = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  const channel = {
+    uuid: channelUuid,
+    transcodeConfig: {},
+    subtitlesEnabled: true,
+  } as ChannelOrmWithTranscodeConfig;
+  const transcodeSession = {
+    streamDuration: dayjs.duration(60, 'seconds'),
+  } as FfmpegTranscodeSession;
+  class RetentionSession extends HlsSession {
+    protected override async waitForStreamReady() {
+      await started.promise;
+      return Result.success(undefined);
+    }
+    protected override async stopInternal() {
+      this.state = 'stopped';
+      finished.resolve();
+    }
+  }
+  return new RetentionSession(
+    channel,
+    {
+      streamMode: 'hls_direct_v2',
+      initialSegmentCount: 2,
+      transcodeDirectory,
+    },
+    {
+      getCurrentLineupItem: vi.fn(async () =>
+        Result.success({
+          lineupItem: {
+            type: 'offline',
+            duration: 60000,
+            streamDuration: 60000,
+            programBeginMs: 0,
+          },
+          channelContext: channel,
+          sourceChannel: channel,
+        }),
+      ),
+    } as unknown as StreamProgramCalculator,
+    {} as ISettingsDB,
+    {
+      getLiveTimestamp: vi.fn(async () => 0),
+    } as unknown as OnDemandChannelService,
+    () =>
+      ({
+        on: vi.fn(),
+        setup: vi.fn(async () => Result.success(transcodeSession)),
+        start: vi.fn(async () => started.resolve()),
+        wait: () => finished.promise,
+        transcodeSession,
+      }) as unknown as ProgramStream,
+    {
+      getChannelSubtitlePreferences: vi.fn(async () => [
+        { languageCode: 'eng' },
+      ]),
+    } as unknown as IChannelDB,
+    { get: () => true } as unknown as FeatureFlagService,
+  );
+}
+
 describe('HlsSession', () => {
+  describe.each(['video', 'master'] as const)(
+    '%s playlist replacement',
+    (kind) => {
+      let directory: tmp.DirResult;
+      let session: HlsSession;
+      const content = '#EXTM3U\n#EXT-X-VERSION:3\n';
+      const read = async () =>
+        kind === 'video'
+          ? (await session.getPlaylist())?.join('\n')
+          : (await session.getMasterPlaylist()).get();
+
+      beforeEach(() => {
+        directory = tmp.dirSync({ unsafeCleanup: true });
+        session = makeSession(directory.name, 'hls_direct_v2');
+      });
+      afterEach(() => {
+        vi.restoreAllMocks();
+        directory.removeCallback();
+      });
+
+      test('serves the replacement after transient ENOENT without a stat/read race', async () => {
+        const absent = Object.assign(new Error('replacement in progress'), {
+          code: 'ENOENT',
+        });
+        const stat = vi.spyOn(fs, 'stat');
+        const file = vi
+          .spyOn(fs, 'readFile')
+          .mockRejectedValueOnce(absent)
+          .mockRejectedValueOnce(absent)
+          .mockResolvedValue(content);
+        expect(await read()).toBe(content);
+        expect(file).toHaveBeenCalledTimes(3);
+        expect(stat).not.toHaveBeenCalled();
+      });
+
+      test('leaves a persistently missing playlist absent after bounded retries', async () => {
+        const file = vi
+          .spyOn(fs, 'readFile')
+          .mockRejectedValue(
+            Object.assign(new Error('absent'), { code: 'ENOENT' }),
+          );
+        expect(await read()).toBeUndefined();
+        expect(file).toHaveBeenCalledTimes(5);
+      });
+
+      test('propagates other I/O errors without retrying', async () => {
+        const file = vi
+          .spyOn(fs, 'readFile')
+          .mockRejectedValue(
+            Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+          );
+        await expect(read()).rejects.toMatchObject(
+          kind === 'master'
+            ? { cause: { code: 'EACCES', message: 'permission denied' } }
+            : { code: 'EACCES', message: 'permission denied' },
+        );
+        expect(file).toHaveBeenCalledTimes(1);
+      });
+
+      test('preserves immediate missing-file behavior for legacy HLS', async () => {
+        session = makeSession(directory.name);
+        const file = vi
+          .spyOn(fs, 'readFile')
+          .mockRejectedValue(
+            Object.assign(new Error('absent'), { code: 'ENOENT' }),
+          );
+        expect(await read()).toBeUndefined();
+        expect(file).toHaveBeenCalledTimes(1);
+      });
+    },
+  );
+
+  test.each([
+    { subtitlesEnabled: false, sidecarEnabled: true },
+    { subtitlesEnabled: true, sidecarEnabled: false },
+    { subtitlesEnabled: true, sidecarEnabled: true },
+  ])(
+    'applies tuned-channel subtitle gates before passing slots to the first producer: %o',
+    async ({ subtitlesEnabled, sidecarEnabled }) => {
+      const directory = tmp.dirSync({ unsafeCleanup: true });
+      const started = Promise.withResolvers<void>();
+      const finished = Promise.withResolvers<void>();
+      const channel = {
+        uuid: channelUuid,
+        transcodeConfig: {},
+        subtitlesEnabled,
+      } as ChannelOrmWithTranscodeConfig;
+      const preferences = vi.fn(async () => [{ languageCode: 'eng' }]);
+      let receivedPlan: unknown;
+      const transcodeSession = {
+        streamDuration: dayjs.duration(60, 'seconds'),
+      } as FfmpegTranscodeSession;
+      class GatedSession extends HlsSession {
+        protected override async waitForStreamReady() {
+          await started.promise;
+          return Result.success(undefined);
+        }
+        protected override async stopInternal() {
+          this.state = 'stopped';
+          finished.resolve();
+        }
+      }
+      const session = new GatedSession(
+        channel,
+        {
+          streamMode: 'hls_direct_v2',
+          initialSegmentCount: 2,
+          transcodeDirectory: directory.name,
+        },
+        {
+          getCurrentLineupItem: vi.fn(async () =>
+            Result.success({
+              lineupItem: {
+                type: 'offline',
+                duration: 60000,
+                streamDuration: 60000,
+                programBeginMs: 0,
+              },
+              channelContext: channel,
+              sourceChannel: channel,
+            }),
+          ),
+        } as unknown as StreamProgramCalculator,
+        {} as ISettingsDB,
+        {
+          getLiveTimestamp: vi.fn(async () => 0),
+        } as unknown as OnDemandChannelService,
+        (_context, _format, options) => {
+          receivedPlan = options?.directSubtitleSlots;
+          return {
+            on: vi.fn(),
+            setup: vi.fn(async () => Result.success(transcodeSession)),
+            start: vi.fn(async () => started.resolve()),
+            wait: () => finished.promise,
+            transcodeSession,
+          } as unknown as ProgramStream;
+        },
+        { getChannelSubtitlePreferences: preferences } as unknown as IChannelDB,
+        { get: () => sidecarEnabled } as unknown as FeatureFlagService,
+      );
+      session.on('error', () => {});
+      try {
+        await session.start();
+        expect(session.state).toBe('started');
+        if (subtitlesEnabled && sidecarEnabled) {
+          expect(preferences).toHaveBeenCalledOnce();
+          expect(receivedPlan).toEqual(createDirectSubtitleSlots(['eng']));
+        } else {
+          expect(preferences).not.toHaveBeenCalled();
+          expect(receivedPlan).toEqual([]);
+        }
+      } finally {
+        await session.stop();
+        directory.removeCallback();
+      }
+    },
+  );
+  test('freezes filtered slots before the first producer and serves the native windows across populated, empty and returned output', async () => {
+    const directory = tmp.dirSync({ unsafeCleanup: true });
+    const started = Array.from({ length: 3 }, () =>
+      Promise.withResolvers<void>(),
+    );
+    const finished = Array.from({ length: 3 }, () =>
+      Promise.withResolvers<void>(),
+    );
+    const channel = {
+      uuid: channelUuid,
+      transcodeConfig: {},
+      subtitlesEnabled: true,
+    } as ChannelOrmWithTranscodeConfig;
+    const slots = createDirectSubtitleSlots(['eng']);
+    const preferences = vi.fn(async () => [
+      { languageCode: 'eng', priority: 0 },
+    ]);
+    const receivedPlans: unknown[] = [];
+    let producerIndex = 0;
+    class FixedSession extends HlsSession {
+      requiredFiles() {
+        return this.getAdditionalRequiredFiles();
+      }
+      protected override async waitForStreamReady() {
+        await started[0]!.promise;
+        return Result.success(undefined);
+      }
+      protected override async stopInternal() {
+        this.state = 'stopped';
+        for (const producer of finished) producer.resolve();
+      }
+    }
+    const session = new FixedSession(
+      channel,
+      {
+        streamMode: 'hls_direct_v2',
+        initialSegmentCount: 2,
+        transcodeDirectory: directory.name,
+      },
+      {
+        getCurrentLineupItem: vi.fn(async () =>
+          Result.success({
+            lineupItem: {
+              type: 'offline',
+              duration: 60000,
+              streamDuration: 60000,
+              programBeginMs: 0,
+            },
+            channelContext: channel,
+            sourceChannel: channel,
+          }),
+        ),
+      } as unknown as StreamProgramCalculator,
+      {} as ISettingsDB,
+      {
+        getLiveTimestamp: vi.fn(async () => 0),
+      } as unknown as OnDemandChannelService,
+      (_context, _format, options) => {
+        const index = producerIndex++;
+        receivedPlans.push(options?.directSubtitleSlots);
+        const transcodeSession = {
+          streamDuration: dayjs.duration(index === 2 ? 60 : 0, 'seconds'),
+          wait: () => finished[index]!.promise,
+        } as unknown as FfmpegTranscodeSession;
+        return {
+          on: vi.fn(),
+          setup: vi.fn(async () => Result.success(transcodeSession)),
+          start: vi.fn(async () => {
+            await options?.beforeProducerStart?.(transcodeSession, {
+              audio: [],
+              subtitles: [...slots],
+            });
+            started[index]!.resolve();
+          }),
+          wait: () => finished[index]!.promise,
+          transcodeSession,
+          renditions: { audio: [], subtitles: [...slots] },
+        } as unknown as ProgramStream;
+      },
+      { getChannelSubtitlePreferences: preferences } as unknown as IChannelDB,
+      { get: () => true } as unknown as FeatureFlagService,
+    );
+    session.on('error', () => {});
+    const write = (name: string, contents: string) =>
+      fs.writeFile(path.join(session.workingDirectory, name), contents);
+    const snapshot = (name: string, run: number) =>
+      fs.readFile(
+        new URL(
+          `./fixtures/ffmpeg7-native-hls/${name}.run${run}.txt`,
+          import.meta.url,
+        ),
+        'utf8',
+      );
+    try {
+      await session.start();
+      await write(
+        'playlist.m3u8',
+        '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\nstream.m3u8',
+      );
+      let originalMaster: string | undefined;
+      for (let run = 0; run < 3; run++) {
+        await write('stream.m3u8', await snapshot('stream.m3u8', run));
+        for (const slot of slots)
+          await write(
+            slot.playlistName,
+            await snapshot(slot.playlistName, run),
+          );
+        const master = (await session.getMasterPlaylist()).get();
+        if (run === 0) originalMaster = master;
+        expect(master).toBe(originalMaster);
+        expect(master?.match(/TYPE=SUBTITLES/g)).toHaveLength(3);
+        expect(session.requiredFiles()).toEqual(
+          slots.map((slot) => slot.playlistName),
+        );
+        expect(
+          session.isSubtitlePlaylist('subtitle_eng_regular_av_.m3u8'),
+        ).toBe(false);
+        expect(session.isSubtitlePlaylist('../subtitle_eng_regular.m3u8')).toBe(
+          false,
+        );
+        const subtitles = (
+          await session.trimSubtitlePlaylist(undefined, slots[0]!.playlistName)
+        ).get();
+        expect(subtitles?.segmentCount).toBe(run === 0 ? 10 : 20);
+        expect(subtitles?.sequence).toBe(run === 2 ? 10 : 0);
+        expect(subtitles?.playlist).not.toContain('/.');
+        expect(subtitles?.playlist).not.toContain('#EXT-X-ENDLIST');
+        if (run < 2) {
+          finished[run]!.resolve();
+          await started[run + 1]!.promise;
+        }
+      }
+      expect(preferences).toHaveBeenCalledTimes(1);
+      expect(receivedPlans).toEqual([slots, slots, slots]);
+      // Never-selected slots were snapshotted before each append restart too.
+      for (const slot of slots.slice(1)) {
+        const subtitle = (
+          await session.trimSubtitlePlaylist(undefined, slot.playlistName)
+        ).get();
+        expect(subtitle?.segmentCount).toBe(20);
+        expect(subtitle?.playlist).not.toContain('/.');
+        expect(subtitle?.playlist).toContain('#EXT-X-DISCONTINUITY');
+      }
+    } finally {
+      await session.stop();
+      directory.removeCallback();
+    }
+  });
+  test('serializes Direct v2 directory cleanup with an in-flight native playlist read', async () => {
+    const directory = tmp.dirSync({ unsafeCleanup: true });
+    const reading = Promise.withResolvers<void>();
+    const releaseRead = Promise.withResolvers<void>();
+    const stopping = Promise.withResolvers<void>();
+    let cleanupStarted = false;
+    class CleanupSession extends HlsSession {
+      activate() {
+        this.state = 'started';
+      }
+      protected override async stopInternal(options: StopOptions) {
+        stopping.resolve();
+        await super.stopInternal(options);
+      }
+      protected override async cleanupDirectory() {
+        cleanupStarted = true;
+        await super.cleanupDirectory();
+      }
+    }
+    const session = new CleanupSession(
+      {
+        uuid: channelUuid,
+        transcodeConfig: {},
+      } as ChannelOrmWithTranscodeConfig,
+      {
+        streamMode: 'hls_direct_v2',
+        initialSegmentCount: 2,
+        transcodeDirectory: directory.name,
+      },
+      {} as StreamProgramCalculator,
+      {} as ISettingsDB,
+      {} as OnDemandChannelService,
+      () => ({}) as ProgramStream,
+    );
+    await fs.mkdir(session.workingDirectory, { recursive: true });
+    await fs.writeFile(
+      path.join(session.workingDirectory, 'stream.m3u8'),
+      '#EXTM3U\n',
+    );
+    session.activate();
+    const readFile = vi
+      .spyOn(fs, 'readFile')
+      .mockImplementationOnce(async () => {
+        reading.resolve();
+        await releaseRead.promise;
+        return '#EXTM3U\n';
+      });
+    try {
+      const subtitleRead = session.trimPlaylist();
+      await reading.promise;
+      const stop = session.stop();
+      await stopping.promise;
+      expect(cleanupStarted).toBe(false);
+      releaseRead.resolve();
+      expect((await subtitleRead).isSuccess()).toBe(true);
+      await stop;
+      expect(cleanupStarted).toBe(true);
+    } finally {
+      releaseRead.resolve();
+      readFile.mockRestore();
+      directory.removeCallback();
+    }
+  });
+  test('starts the Direct v2 producer while startup holds the lifecycle lock', async () => {
+    const directory = tmp.dirSync({ unsafeCleanup: true });
+    const producerStarted = Promise.withResolvers<void>();
+    const producerFinished = Promise.withResolvers<void>();
+    const channel = {
+      uuid: channelUuid,
+      transcodeConfig: {},
+    } as ChannelOrmWithTranscodeConfig;
+    const transcodeSession = {
+      streamDuration: dayjs.duration(60, 'seconds'),
+      wait: () => producerFinished.promise,
+    } as unknown as FfmpegTranscodeSession;
+    const startProducer = vi.fn(async () => producerStarted.resolve());
+    const programStream = {
+      on: vi.fn(),
+      setup: vi.fn(async () => Result.success(transcodeSession)),
+      start: startProducer,
+      wait: () => producerFinished.promise,
+      transcodeSession,
+      renditions: {
+        audio: [],
+        nativeSubtitleOutput: true,
+        subtitle: {
+          language: 'eng',
+          default: false,
+          forced: false,
+          nativeHls: true,
+        },
+      },
+    } as unknown as ProgramStream;
+    class StartupSession extends HlsSession {
+      protected override async waitForStreamReady() {
+        return Result.attemptAsync(async () => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              producerStarted.promise,
+              new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                  () => reject(new Error('Producer blocked during startup')),
+                  1000,
+                );
+              }),
+            ]);
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+          }
+        });
+      }
+      protected override async stopInternal() {
+        this.state = 'stopped';
+        producerFinished.resolve();
+      }
+    }
+    const session = new StartupSession(
+      channel,
+      {
+        streamMode: 'hls_direct_v2',
+        initialSegmentCount: 2,
+        transcodeDirectory: directory.name,
+      },
+      {
+        getCurrentLineupItem: vi.fn(async () =>
+          Result.success({
+            lineupItem: {
+              type: 'offline',
+              duration: 60000,
+              streamDuration: 60000,
+              programBeginMs: 0,
+            },
+            channelContext: channel,
+            sourceChannel: channel,
+          }),
+        ),
+      } as unknown as StreamProgramCalculator,
+      {} as ISettingsDB,
+      {
+        getLiveTimestamp: vi.fn(async () => 0),
+      } as unknown as OnDemandChannelService,
+      () => programStream,
+    );
+    session.on('error', () => {});
+    try {
+      await session.start();
+      expect(session.state).toBe('started');
+      expect(startProducer).toHaveBeenCalledTimes(1);
+
+      const videoLines = [
+        '#EXTM3U',
+        '#EXT-X-TARGETDURATION:7',
+        '#EXT-X-MEDIA-SEQUENCE:40',
+      ];
+      for (let index = 40; index < 60; index++) {
+        videoLines.push(
+          '#EXTINF:4.12,',
+          `data${String(index).padStart(6, '0')}.ts`,
+        );
+      }
+      await fs.writeFile(
+        path.join(session.workingDirectory, 'stream.m3u8'),
+        videoLines.join('\n'),
+      );
+      for (const number of [39, 40, 60])
+        await fs.writeFile(
+          path.join(
+            session.workingDirectory,
+            `data${String(number).padStart(6, '0')}.ts`,
+          ),
+          '',
+        );
+      session.onSegmentRequested('client', 'data000030.ts');
+      const native = (await session.trimPlaylist()).get();
+      expect(native?.sequence).toBe(40);
+      expect(native?.playlist).toContain('#EXT-X-TARGETDURATION:7');
+      expect(native?.playlist?.match(/#EXTINF:4.12,/g)).toHaveLength(20);
+      expect(native?.playlist).toContain('data000040.ts');
+      expect(native?.playlist).toContain('data000059.ts');
+      const files = await fs.readdir(session.workingDirectory);
+      expect(files).toContain('data000039.ts');
+      expect(files).toContain('data000040.ts');
+      expect(files).toContain('data000060.ts');
+    } finally {
+      await session.stop();
+      directory.removeCallback();
+    }
+  });
+
+  describe('native segment retention', () => {
+    const retiredAt = new Date('2026-01-01T00:00:00Z').getTime();
+    let directory: tmp.DirResult;
+    let session: HlsSession;
+    const [slot] = createDirectSubtitleSlots(['eng']);
+    if (slot === undefined)
+      throw new Error('Expected an English subtitle slot');
+
+    beforeEach(async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(retiredAt);
+      directory = tmp.dirSync({ unsafeCleanup: true });
+      session = makeNativeRetentionSession(directory.name);
+      await session.start();
+    });
+
+    afterEach(async () => {
+      await session.stop();
+      directory.removeCallback();
+      vi.useRealTimers();
+    });
+
+    const videoName = (number: number) =>
+      `data${String(number).padStart(6, '0')}.ts`;
+    const subtitleName = (number: number) =>
+      `${slot.segmentPrefix}${number}.vtt`;
+
+    async function writePlaylist(
+      name: string,
+      sequence: number,
+      count: number,
+      segmentName: (number: number) => string,
+    ) {
+      const lines = [
+        '#EXTM3U',
+        '#EXT-X-TARGETDURATION:4',
+        `#EXT-X-MEDIA-SEQUENCE:${sequence}`,
+      ];
+      for (let index = sequence; index < sequence + count; index++)
+        lines.push('#EXTINF:4,', `/stream/${segmentName(index)}`);
+      await fs.writeFile(
+        path.join(session.workingDirectory, name),
+        lines.join('\n'),
+      );
+    }
+
+    async function prune(sequence: number, elapsedSeconds: number) {
+      vi.setSystemTime(retiredAt + elapsedSeconds * 1000);
+      await (
+        session as unknown as {
+          pruneNativeSegments(videoSequence: number): Promise<void>;
+        }
+      ).pruneNativeSegments(sequence);
+    }
+
+    test.each(['video', 'subtitle'])(
+      'retains retired TS and VTT for the longest served %s window plus segment duration',
+      async (longestWindow) => {
+        await writePlaylist(
+          'stream.m3u8',
+          0,
+          longestWindow === 'video' ? 20 : 2,
+          videoName,
+        );
+        await writePlaylist(
+          slot.playlistName,
+          0,
+          longestWindow === 'subtitle' ? 20 : 2,
+          subtitleName,
+        );
+        for (const name of [
+          videoName(0),
+          videoName(1),
+          videoName(100),
+          subtitleName(0),
+          subtitleName(1),
+          subtitleName(100),
+          'subtitle_unregistered_av_0.vtt',
+        ]) {
+          const filename = path.join(session.workingDirectory, name);
+          await fs.writeFile(filename, 'segment');
+          // Age before production is not the time it left the served window.
+          await fs.utimes(filename, new Date(0), new Date(0));
+        }
+        if (longestWindow === 'video') {
+          expect((await session.trimPlaylist()).get()?.segmentCount).toBe(20);
+        } else {
+          expect(
+            (
+              await session.trimSubtitlePlaylist(undefined, slot.playlistName)
+            ).get()?.segmentCount,
+          ).toBe(20);
+        }
+
+        // Later short windows must not shrink the already advertised grace.
+        await writePlaylist('stream.m3u8', 1, 2, videoName);
+        await writePlaylist(slot.playlistName, 1, 2, subtitleName);
+        expect((await session.trimPlaylist()).get()?.sequence).toBe(1);
+        await prune(1, 0);
+        for (const seconds of [10, 83]) {
+          await prune(1, seconds);
+          for (const name of [videoName(0), subtitleName(0)])
+            expect(
+              await fs.readFile(
+                path.join(session.workingDirectory, name),
+                'utf8',
+              ),
+            ).toBe('segment');
+        }
+        await prune(1, 84);
+        const files = await fs.readdir(session.workingDirectory);
+        expect(files).not.toContain(videoName(0));
+        expect(files).not.toContain(subtitleName(0));
+        for (const name of [
+          videoName(1),
+          videoName(100),
+          subtitleName(1),
+          subtitleName(100),
+          'subtitle_unregistered_av_0.vtt',
+        ])
+          expect(files).toContain(name);
+      },
+    );
+
+    test('restarts retirement when a previously retired URI is served again', async () => {
+      await writePlaylist('stream.m3u8', 0, 20, videoName);
+      const filename = path.join(session.workingDirectory, videoName(0));
+      await fs.writeFile(filename, 'segment');
+      await session.trimPlaylist();
+      await writePlaylist('stream.m3u8', 1, 2, videoName);
+      await prune(1, 0);
+
+      vi.setSystemTime(retiredAt + 50_000);
+      await writePlaylist('stream.m3u8', 0, 2, videoName);
+      expect((await session.trimPlaylist()).get()?.sequence).toBe(0);
+      await writePlaylist('stream.m3u8', 1, 2, videoName);
+      await prune(1, 60);
+      await prune(1, 84);
+      expect(await fs.readFile(filename, 'utf8')).toBe('segment');
+      await prune(1, 144);
+      expect(await fs.readdir(session.workingDirectory)).not.toContain(
+        videoName(0),
+      );
+    });
+  });
+
   describe('getMasterPlaylist', () => {
     let dir: tmp.DirResult;
 
@@ -294,16 +1012,40 @@ describe('HlsSession', () => {
       session: HlsSession,
       sequenceNum: number,
       extensions: string[],
+      subtitlePrefix?: string,
     ) {
       return (
         session as unknown as {
           deleteOldSegmentFiles(
             sequenceNum: number,
             extensions: string[],
+            subtitlePrefix?: string,
           ): Promise<void>;
         }
-      ).deleteOldSegmentFiles(sequenceNum, extensions);
+      ).deleteOldSegmentFiles(sequenceNum, extensions, subtitlePrefix);
     }
+
+    test('prunes only the requested native rendition prefix', async () => {
+      const session = makeSession(dir.name);
+      await fs.mkdir(session.workingDirectory, { recursive: true });
+      const files = [
+        'subtitle_a12_av_0.vtt',
+        'subtitle_a12_av_1.vtt',
+        'subtitle_b34_av_0.vtt',
+        'data000000.ts',
+      ];
+      await Promise.all(
+        files.map((file) =>
+          fs.writeFile(path.join(session.workingDirectory, file), ''),
+        ),
+      );
+      await callDeleteOldSegmentFiles(session, 1, ['.vtt'], 'subtitle_a12_av_');
+      expect((await fs.readdir(session.workingDirectory)).sort()).toEqual([
+        'data000000.ts',
+        'subtitle_a12_av_1.vtt',
+        'subtitle_b34_av_0.vtt',
+      ]);
+    });
 
     test('deletes .ts/.mp4 segments below the sequence number (regression)', async () => {
       const session = makeSession(dir.name);

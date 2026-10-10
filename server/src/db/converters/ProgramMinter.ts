@@ -176,6 +176,9 @@ export class ProgramDaoMinter {
           streamKind: stream.streamType,
           uuid: v4(),
           bitsPerSample: stream.bitDepth,
+          bitrate: stream.bitrate,
+          statisticsBitrate: stream.statisticsBitrate,
+          hasAttachedPicture: stream.hasAttachedPicture,
           channels: stream.channels,
           colorRange: stream.colorRange ?? null,
           colorSpace: stream.colorSpace ?? null,
@@ -192,6 +195,8 @@ export class ProgramDaoMinter {
       const files = item.mediaItem.locations.map((loc) => {
         return {
           path: loc.path,
+          sizeBytes: loc.sizeBytes,
+          duration: loc.duration,
           programVersionId: versionId,
           localMediaFolderId: localFolderId,
           uuid: v4(),
@@ -212,6 +217,8 @@ export class ProgramDaoMinter {
           programId,
           displayAspectRatio: item.mediaItem.displayAspectRatio,
           duration: item.mediaItem.duration,
+          bitrate: item.mediaItem.bitrate,
+          container: item.mediaItem.container,
           frameRate: match(item.mediaItem.frameRate)
             .with(P.string, (str) => str)
             .with(P.number, (num) => num.toString())

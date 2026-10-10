@@ -33,6 +33,7 @@ import type { VideoInputSource } from '@/ffmpeg/builder/input/VideoInputSource.j
 import type { WatermarkInputSource } from '@/ffmpeg/builder/input/WatermarkInputSource.js';
 import { HlsConcatOutputFormat } from '@/ffmpeg/builder/options/HlsConcatOutputFormat.js';
 import { HlsDirectOutputFormat } from '@/ffmpeg/builder/options/HlsDirectOutputFormat.js';
+import { HlsDirectSubtitleOutputFormat } from '@/ffmpeg/builder/options/HlsDirectSubtitleOutputFormat.js';
 import { HlsOutputFormat } from '@/ffmpeg/builder/options/HlsOutputFormat.js';
 import { HlsSubtitleOutputFormat } from '@/ffmpeg/builder/options/HlsSubtitleOutputFormat.js';
 import { LogLevelOption } from '@/ffmpeg/builder/options/LogLevelOption.js';
@@ -90,6 +91,7 @@ import type { FilterOption } from '../filter/FilterOption.ts';
 import { LoudnormFilter } from '../filter/LoudnormFilter.ts';
 import { StreamSeekFilter } from '../filter/StreamSeekFilter.ts';
 import type { SubtitlesInputSource } from '../input/SubtitlesInputSource.ts';
+import { EmptyWebVttInputSource } from '../input/EmptyWebVttInputSource.ts';
 import {
   AudioBitrateOutputOption,
   AudioBufferSizeOutputOption,
@@ -109,6 +111,7 @@ import {
   FastStartOutputOption,
   makeConstantOutputOption,
   MapAllNonSubtitleStreamsOutputOption,
+  MapHlsDirectStreamsOutputOption,
   MapAllStreamsOutputOption,
   MatroskaOutputFormatOption,
   MetadataServiceNameOutputOption,
@@ -222,12 +225,20 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
   });
   protected decoder: Nullable<Decoder> = null;
   protected context!: PipelineBuilderContext;
+  private additionalSubtitleInputSources: readonly SubtitlesInputSource[] = [];
   protected featureFlagService: Pick<FeatureFlagService, 'get'> = {
     get: resolveFeatureFlagFromEnv,
   };
 
   setFeatureFlagService(svc: FeatureFlagService): this {
     this.featureFlagService = svc;
+    return this;
+  }
+
+  setAdditionalSubtitleInputSources(
+    sources: readonly SubtitlesInputSource[],
+  ): this {
+    this.additionalSubtitleInputSources = sources;
     return this;
   }
 
@@ -430,8 +441,34 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
       this.videoInputSource.addOption(new HttpReconnectOptions());
     }
 
-    if (this.ffmpegState.copyAllStreams) {
-      return this.buildCopyAllPipeline();
+    const directHls =
+      this.ffmpegState.outputFormat.type === OutputFormatTypes.HlsDirectV2;
+    if (
+      (directHls ||
+        (!this.ffmpegState.copyAllStreams &&
+          this.desiredState.videoFormat !== 'copy')) &&
+      (this.ffmpegState.ptsOffset ?? 0) > 0 &&
+      !isNull(this.desiredState.videoTrackTimescale)
+    ) {
+      // Copy preserves the input seek position. Translate that position onto
+      // the channel clock once, before tee sends the same packets to AV/VTT.
+      const inputSeek = directHls
+        ? (this.ffmpegState.start?.asSeconds() ?? 0) *
+          this.desiredState.videoTrackTimescale
+        : 0;
+      this.pipelineSteps.push(
+        OutputTsOffsetOption(
+          (this.ffmpegState.ptsOffset ?? 0) - inputSeek,
+          this.desiredState.videoTrackTimescale,
+        ),
+      );
+    }
+
+    if (
+      this.ffmpegState.copyAllStreams ||
+      this.ffmpegState.hlsDirectStreamCopy !== undefined
+    ) {
+      return this.buildStreamCopyPipeline();
     }
 
     if (
@@ -441,19 +478,6 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
       this.videoInputSource.path !== this.audioInputSource.path
     ) {
       this.audioInputSource.addOption(new HttpReconnectOptions());
-    }
-
-    if (
-      this.desiredState.videoFormat !== 'copy' &&
-      (this.ffmpegState.ptsOffset ?? 0) > 0 &&
-      !isNull(this.desiredState.videoTrackTimescale)
-    ) {
-      this.pipelineSteps.push(
-        OutputTsOffsetOption(
-          this.ffmpegState.ptsOffset ?? 0,
-          this.desiredState.videoTrackTimescale,
-        ),
-      );
     }
 
     if (isVideoPipelineContext(this.context)) {
@@ -523,21 +547,40 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
       audioInput: this.audioInputSource,
       watermarkInput: this.watermarkInputSource,
       subtitleInput: this.subtitleInputSource,
+      additionalSubtitleInputs: this.additionalSubtitleInputSources,
       concatInput: this.concatInputSource,
     });
   }
 
   /**
-   * Builds a pipeline that maps all input streams and copies them directly
-   * to the output without re-encoding. Used for passthrough modes
-   * (hls_direct_v2).
+   * Copies mapped video/audio, retaining codec overrides for incompatible audio.
+   * Direct v2 maps its selected streams; explicit remux retains all streams.
    */
-  private buildCopyAllPipeline(): Pipeline {
+  private buildStreamCopyPipeline(): Pipeline {
+    const directMapping = this.ffmpegState.hlsDirectStreamCopy;
     this.pipelineSteps.push(
-      MapAllNonSubtitleStreamsOutputOption(),
+      directMapping !== undefined
+        ? MapHlsDirectStreamsOutputOption(directMapping.audioInputIndex)
+        : MapAllNonSubtitleStreamsOutputOption(),
       new CopyVideoEncoder(),
       new CopyAudioEncoder(),
     );
+
+    const bitrate = this.ffmpegState.hlsDirectBitrate;
+    if (
+      this.ffmpegState.outputFormat.type === OutputFormatTypes.HlsDirectV2 &&
+      bitrate !== undefined &&
+      Number.isFinite(bitrate) &&
+      bitrate > 0
+    ) {
+      // A positive declaration lets FFmpeg publish a copied variant when the
+      // demuxer has no stream rates (notably Matroska). This is a whole-source
+      // estimate, not an encoding target. The HLS writer may add its declared
+      // audio rate and ten-percent allowance; exact accounting is unnecessary.
+      this.pipelineSteps.push(
+        makeConstantOutputOption(['-b:v', `${Math.ceil(bitrate)}`]),
+      );
+    }
 
     // Per-stream audio codec overrides for incompatible codecs
     // (e.g. DTS/TrueHD cannot be muxed into MPEG-TS).
@@ -573,6 +616,7 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
       audioInput: null,
       watermarkInput: null,
       subtitleInput: this.subtitleInputSource,
+      additionalSubtitleInputs: this.additionalSubtitleInputSources,
       concatInput: this.concatInputSource,
     });
   }
@@ -964,6 +1008,122 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
             this.ffmpegState.isFirstTranscode ??
             (isNil(this.ffmpegState.ptsOffset) ||
               this.ffmpegState.ptsOffset === 0);
+          const renditions = this.ffmpegState.hlsDirectSubtitles;
+          if (renditions && renditions.length > 0) {
+            if (
+              this.subtitleInputSource !== null ||
+              this.additionalSubtitleInputSources.length === 0 ||
+              renditions.some(
+                ({ subtitleOutputIndex }) =>
+                  !Number.isSafeInteger(subtitleOutputIndex) ||
+                  subtitleOutputIndex < 0 ||
+                  subtitleOutputIndex >=
+                    this.additionalSubtitleInputSources.length,
+              )
+            ) {
+              throw new Error(
+                'Direct subtitle renditions require matching subtitle inputs',
+              );
+            }
+            const includedPaths = [this.videoInputSource.path];
+            if (this.ffmpegState.hlsDirectStreamCopy === undefined) {
+              for (const input of [
+                this.audioInputSource,
+                this.watermarkInputSource,
+              ]) {
+                if (input && !includedPaths.includes(input.path))
+                  includedPaths.push(input.path);
+              }
+            }
+            const mappedStreams = new Set<string>();
+            for (const subtitle of this.additionalSubtitleInputSources) {
+              const stream = first(subtitle.streams);
+              const sharesVideoInput =
+                stream?.inputKind === 'embedded' &&
+                subtitle.path === this.videoInputSource.path;
+              if (
+                subtitle.method !== SubtitleMethods.Convert ||
+                (!sharesVideoInput &&
+                  !(subtitle instanceof EmptyWebVttInputSource) &&
+                  (subtitle.protocol !== 'file' ||
+                    subtitle.path.startsWith('data:'))) ||
+                !stream ||
+                stream.isImageBased
+              ) {
+                throw new Error(
+                  'Direct subtitles require text from the video input or a local file',
+                );
+              }
+              let inputIndex = includedPaths.indexOf(subtitle.path);
+              if (inputIndex < 0) {
+                inputIndex = includedPaths.length;
+                includedPaths.push(subtitle.path);
+              }
+              const reference = `${inputIndex}:${stream.index}`;
+              if (mappedStreams.has(reference)) {
+                throw new Error(
+                  'Direct subtitle rendition maps the same stream twice',
+                );
+              }
+              mappedStreams.add(reference);
+              this.pipelineSteps.push(
+                makeConstantOutputOption(['-map', reference]),
+              );
+            }
+            this.pipelineSteps.push(
+              makeConstantOutputOption(['-c:s', 'webvtt']),
+            );
+            const subtitleStart = this.ffmpegState.start?.asSeconds() ?? 0;
+            if (subtitleStart > 0 && Number.isFinite(subtitleStart)) {
+              // A native HLS child anchors segmentation to its first packet.
+              // Old sidecar cues otherwise anchor it before the seeked AV.
+              // Input -ss alone leaves the preceding subtitle cue in FFmpeg 7.
+              // Trim subtitles to the requested tune-in point: discard expired
+              // cues and preserve an active cue's end while clipping its start.
+              // Copied AV may retain preroll from an earlier keyframe; its
+              // timestamps and the HLS muxers' shared clock stay unchanged.
+              this.pipelineSteps.push(
+                makeConstantOutputOption([
+                  '-bsf:s',
+                  `noise=amount=0:drop='lte((pts+duration)*tb,${subtitleStart})',` +
+                    `setts=pts='max(PTS,${subtitleStart}/TB)':` +
+                    `dts='max(DTS,${subtitleStart}/TB)':` +
+                    `duration='max(0,PTS+DURATION-max(PTS,${subtitleStart}/TB))'`,
+                ]),
+              );
+            }
+            this.pipelineSteps.push(
+              new HlsDirectSubtitleOutputFormat(
+                this.ffmpegState.hlsPlaylistPath,
+                this.ffmpegState.hlsSegmentTemplate,
+                this.ffmpegState.hlsBaseStreamUrl,
+                this.ffmpegState.hlsDirectStreamCopy !== undefined
+                  ? this.ffmpegState.hlsDirectStreamCopy.audioInputIndex !==
+                    undefined
+                  : this.audioInputSource !== null,
+                renditions,
+                isFirst,
+                this.ffmpegState.emitEndList,
+              ),
+            );
+            break;
+          }
+          const nativeSubtitle =
+            this.ffmpegState.hlsDirectSubtitle !== undefined;
+          if (
+            this.subtitleInputSource?.method === SubtitleMethods.Convert &&
+            nativeSubtitle
+          ) {
+            // Input stream references and per-type output ordinals are distinct.
+            this.pipelineSteps.push(
+              makeConstantOutputOption([
+                '-map',
+                this.computeSubtitleMapRef(),
+                '-c:s',
+                'webvtt',
+              ]),
+            );
+          }
           this.pipelineSteps.push(
             new HlsDirectOutputFormat(
               this.ffmpegState.hlsPlaylistPath,
@@ -971,9 +1131,13 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
               this.ffmpegState.hlsBaseStreamUrl,
               isFirst,
               this.ffmpegState.emitEndList,
+              this.ffmpegState.hlsDirectSubtitle,
             ),
           );
-          if (this.subtitleInputSource?.method === SubtitleMethods.Convert) {
+          if (
+            this.subtitleInputSource?.method === SubtitleMethods.Convert &&
+            !nativeSubtitle
+          ) {
             this.pipelineSteps.push(
               new HlsSubtitleOutputFormat(
                 path.join(

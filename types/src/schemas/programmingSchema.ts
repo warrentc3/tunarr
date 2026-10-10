@@ -135,6 +135,9 @@ const BaseItem = z.object({
 
 const BaseMediaLocation = z.object({
   path: z.string(),
+  sizeBytes: z.number().nonnegative().nullish(),
+  // Full duration of this file in milliseconds, not the scheduled playback slice.
+  duration: z.number().nonnegative().nullish(),
 });
 
 export const LocalMediaLocation = BaseMediaLocation.extend({
@@ -172,6 +175,9 @@ export const MediaStream = z.object({
   streamType: MediaStreamType,
   title: z.string().nullish(),
   hasAttachedPicture: z.boolean().nullish(),
+  // Reported track bitrate and Matroska statistics bitrate, both in bits/second.
+  bitrate: z.number().nullish(),
+  statisticsBitrate: z.number().nullish(),
   fileName: z.string().nullish(),
   mimeType: z.string().nullish(),
 
@@ -237,6 +243,9 @@ export const MediaArtwork = z.object({
 export const MediaItem = z.object({
   streams: z.array(MediaStream),
   duration: z.number().nonnegative(),
+  // The source total is kept separate from the individual track rates.
+  bitrate: z.number().nullish(), // bits/second
+  container: z.string().nullish(),
   sampleAspectRatio: z.string().nullish(),
   displayAspectRatio: z.string().nullish(),
   frameRate: z.number().or(z.string()).nullish(),

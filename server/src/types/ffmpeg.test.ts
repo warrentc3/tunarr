@@ -119,3 +119,23 @@ describe('FfprobeMediaInfoSchema subtitle streams', () => {
     }
   });
 });
+
+describe('FfprobeMediaInfoSchema source metadata', () => {
+  test('allows unavailable format bitrate and size without dropping the probe', () => {
+    const { size: _size, bit_rate: _bitrate, ...format } = baseProbe.format;
+    const result = FfprobeMediaInfoSchema.parse({ ...baseProbe, format });
+    expect(result.format.size).toBeUndefined();
+    expect(result.format.bit_rate).toBeUndefined();
+    expect(result.format.duration).toBe(1320.81);
+  });
+
+  test('preserves the attached-picture disposition on a video stream', () => {
+    const result = FfprobeMediaInfoSchema.parse({
+      ...baseProbe,
+      streams: [{ ...baseProbe.streams[0], disposition: { attached_pic: 1 } }],
+    });
+    expect(result.streams[0]).toMatchObject({
+      disposition: { attached_pic: 1 },
+    });
+  });
+});

@@ -42,6 +42,14 @@ Tunarr traverses folders to discover metadata and media files which can then be 
 
 There are many ways to generate NFO files for consumption by Tunarr if your media does not already have them. Popular *arr stack programs, Jellyfin, and Emby all support writing out NFO files for media.
 
+## External Subtitles
+
+Local scans discover SRT, VTT, ASS, and SSA subtitle files next to their video. Start the subtitle filename with the complete video basename, then add the language and any `forced`, `sdh`, `cc`, or `hi` markers before the extension. For example, `Episode.mkv` can have `Episode.eng.forced.srt` and `Episode.en.sdh.vtt`.
+
+Language codes and English language names are recognized. Regional suffixes such as `en-US` resolve to the base language. `hi` identifies Hindi when it is the language; after another language, it marks hearing-impaired subtitles. A literal `default` filename marker is ignored and does not make a subtitle the default.
+
+Run a forced library scan to discover sidecars for media that was already scanned. Subtitle selection follows the channel's language and subtitle preferences. HLS Direct v2 serves text subtitles as selectable WebVTT renditions; image subtitles require burn-in and are excluded from that mode.
+
 ## Folder Structure
 
 For best results, organize your media following standard conventions:

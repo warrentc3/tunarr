@@ -15,6 +15,8 @@ import { autoFactoryKey, KEYS } from '@/types/inject.js';
 import type { ContainerModuleLoadOptions, Factory } from 'inversify';
 import { ContainerModule } from 'inversify';
 import type { ISettingsDB } from '../db/interfaces/ISettingsDB.ts';
+import type { IChannelDB } from '../db/interfaces/IChannelDB.ts';
+import { FeatureFlagService } from '../services/FeatureFlagService.ts';
 import type { FFmpegAssistedFactory } from '../ffmpeg/FFmpegModule.ts';
 import { FillerPickerV2 } from '../services/scheduling/FillerPickerV2.ts';
 import { bindAssistedFactory } from '../util/assistedInject.ts';
@@ -41,6 +43,8 @@ const configure = ({ bind }: ContainerModuleLoadOptions) => {
         ctx.get<ISettingsDB>(KEYS.SettingsDB),
         ctx.get(OnDemandChannelService),
         ctx.get<ProgramStreamFactory>(KEYS.ProgramStreamFactory),
+        ctx.get<IChannelDB>(KEYS.ChannelDB),
+        ctx.get(FeatureFlagService),
       );
     };
   });

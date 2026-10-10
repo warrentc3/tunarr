@@ -15,7 +15,7 @@ import type { HlsOptions } from '../../ffmpeg/builder/constants.ts';
 import { defaultHlsOptions } from '../../ffmpeg/builder/constants.ts';
 import { serverOptions } from '../../globals.ts';
 
-export const SegmentNameRegex = /\D+(\d+)\.(ts|mp4|vtt)/;
+export const SegmentNameRegex = /^.*?(\d+)\.(ts|mp4|vtt)$/;
 
 // FfmpegProcess escalates to SIGKILL after 15s, so this leaves room for the
 // kill to land.
@@ -27,6 +27,7 @@ const ExitWaitTimeoutMs = 30_000;
 type SegmentRequestRecord = {
   video?: number;
   subtitle?: number;
+  subtitleRenditions?: Record<string, number>;
 };
 
 export abstract class BaseHlsSession<
@@ -47,7 +48,7 @@ export abstract class BaseHlsSession<
 
   protected _minByIp = new Map<string, SegmentRequestRecord>();
 
-  private minRequestedFor(kind: keyof SegmentRequestRecord): number {
+  private minRequestedFor(kind: 'video' | 'subtitle'): number {
     let min: number | undefined;
     for (const record of this._minByIp.values()) {
       const value = record[kind];
@@ -67,6 +68,17 @@ export abstract class BaseHlsSession<
 
   protected get minSubtitleSegmentRequested(): number {
     return this.minRequestedFor('subtitle');
+  }
+
+  protected minSubtitleSegmentRequestedFor(rendition: string): number {
+    let min: number | undefined;
+    for (const record of this._minByIp.values()) {
+      const value = record.subtitleRenditions?.[rendition];
+      if (value !== undefined && (min === undefined || value < min)) {
+        min = value;
+      }
+    }
+    return min ?? 0;
   }
 
   constructor(
@@ -111,15 +123,28 @@ export abstract class BaseHlsSession<
     return this._serverPath;
   }
 
-  onSegmentRequested(clientIp: string, filename: string) {
+  onSegmentRequested(
+    clientIp: string,
+    filename: string,
+    subtitleRendition?: string,
+  ) {
     const base = basename(filename);
     const matches = base.match(SegmentNameRegex);
     if (matches && matches.length > 2) {
       const parsed = parseInt(matches[1]!);
       if (!isNaN(parsed)) {
-        const kind: keyof SegmentRequestRecord =
-          matches[2] === 'vtt' ? 'subtitle' : 'video';
+        const kind = matches[2] === 'vtt' ? 'subtitle' : 'video';
         const existing = this._minByIp.get(clientIp) ?? {};
+        if (kind === 'subtitle' && subtitleRendition !== undefined) {
+          this._minByIp.set(clientIp, {
+            ...existing,
+            subtitleRenditions: {
+              ...existing.subtitleRenditions,
+              [subtitleRendition]: parsed,
+            },
+          });
+          return;
+        }
         this._minByIp.set(clientIp, { ...existing, [kind]: parsed });
       }
     }

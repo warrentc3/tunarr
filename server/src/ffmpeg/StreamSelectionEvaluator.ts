@@ -92,6 +92,7 @@ export async function evaluateStreamSelectionProfile(
   celService: CelEvaluationService,
   celContext: StreamSelectionCelContext,
   lineupItem: ContentBackedStreamLineupItem,
+  options: { audioOnly?: boolean } = {},
 ): Promise<StreamSelectionResult> {
   for (const rule of profile.rules) {
     const conditionResult = celService.evaluate(rule.condition, celContext);
@@ -102,11 +103,13 @@ export async function evaluateStreamSelectionProfile(
         rule.condition,
       );
       const audioStream = resolveAudioAction(rule.audioAction, audioStreams);
-      const subtitleStream = await resolveSubtitleAction(
-        rule.subtitleAction,
-        subtitleStreams,
-        lineupItem,
-      );
+      const subtitleStream = options.audioOnly
+        ? null
+        : await resolveSubtitleAction(
+            rule.subtitleAction,
+            subtitleStreams,
+            lineupItem,
+          );
       return { audioStream, subtitleStream };
     }
   }

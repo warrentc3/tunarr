@@ -8,6 +8,8 @@ import { merge } from 'lodash-es';
 import path from 'node:path';
 import type { MarkRequired } from 'ts-essentials';
 import type { OutputFormat, OutputLocation } from '../constants.ts';
+import type { HlsSubtitleVariant } from '../options/HlsVariantStreamMap.ts';
+import type { HlsDirectSubtitleRendition } from '../options/HlsDirectSubtitleOutputFormat.ts';
 import {
   MpegTsOutputFormat,
   OutputFormatTypes,
@@ -84,7 +86,8 @@ export class FfmpegState {
   softwareDeinterlaceFilter: string = 'yadif=1';
   vaapiDevice: Nullable<string> = null;
   vaapiDriver: Nullable<string> = null;
-  outputFormat: OutputFormat = MpegTsOutputFormat; // TODO: No
+  // merge() mutates its destination; each state must own this default object.
+  outputFormat: OutputFormat = { ...MpegTsOutputFormat };
   outputLocation: OutputLocation = StdoutOutputLocation;
   ptsOffset?: number;
   /**
@@ -110,7 +113,7 @@ export class FfmpegState {
   /**
    * When true, maps all streams from the input and copies them,
    * bypassing individual video/audio pipeline construction.
-   * Used for passthrough modes like `hls_direct_v2`.
+   * Used for explicit remux. Direct v2 uses hlsDirectStreamCopy instead.
    *
    * Audio streams with codecs incompatible with the output container
    * (e.g. DTS/TrueHD in MPEG-TS) are transcoded per
@@ -119,11 +122,25 @@ export class FfmpegState {
   copyAllStreams: boolean = false;
 
   /**
+   * Direct v2 copies one non-cover video and one selected source audio.
+   * The absolute input index is not the output ordinal, which is always a:0.
+   * Undefined audio retains the existing behavior for a source without audio.
+   */
+  hlsDirectStreamCopy?: { audioInputIndex?: number };
+
+  /**
    * Per-stream audio codec overrides for copy-all mode. Each entry maps
    * an output audio stream index to a target codec (e.g. `ac3`).
    * Streams not listed here are copied as-is.
    */
   audioCodecOverrides: AudioCodecOverride[] = [];
+
+  /** Direct v2's selected subtitle mapped into FFmpeg's native HLS output. */
+  hlsDirectSubtitle?: HlsSubtitleVariant;
+  /** Direct text slots referencing the uniquely mapped subtitle output ordinals. */
+  hlsDirectSubtitles?: HlsDirectSubtitleRendition[];
+  /** Complete source estimate in bits/s, used only as a copy-mode HLS hint. */
+  hlsDirectBitrate?: number;
 
   // HLS
   get hlsPlaylistPath(): Maybe<string> {

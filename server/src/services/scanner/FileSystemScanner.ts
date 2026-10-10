@@ -173,6 +173,7 @@ export abstract class FileSystemScanner {
           const videoStream: MediaStream = {
             ...probeVideoStream,
             bitDepth: probeVideoStream.bitDepth,
+            hasAttachedPicture: probeVideoStream.isAttachedPic,
             streamType: 'video',
             codec: probeVideoStream.codec ?? 'unknown',
             channels: null,
@@ -238,7 +239,9 @@ export abstract class FileSystemScanner {
 
       const firstVideoStream = head(
         orderBy(
-          streamDetails.streamDetails.videoDetails,
+          streamDetails.streamDetails.videoDetails?.filter(
+            (stream) => !stream.isAttachedPic,
+          ),
           (v, i) => (v.streamIndex ?? 0) + i,
           'asc',
         ),
@@ -253,6 +256,8 @@ export abstract class FileSystemScanner {
         displayAspectRatio: firstVideoStream?.displayAspectRatio,
         sampleAspectRatio: firstVideoStream?.sampleAspectRatio,
         duration: +streamDetails.streamDetails.duration,
+        bitrate: streamDetails.streamDetails.bitrate,
+        container: streamDetails.streamDetails.sourceContainer,
         frameRate: firstVideoStream?.framerate,
         resolution:
           isDefined(firstVideoStream?.height) &&
@@ -268,6 +273,8 @@ export abstract class FileSystemScanner {
           {
             type: 'local',
             path: filePath,
+            sizeBytes: streamDetails.streamDetails.sourceSizeBytes,
+            duration: streamDetails.streamDetails.sourceFileDurationMs,
           },
         ],
       };

@@ -132,6 +132,33 @@ async function canonicalizedStreams(): Promise<MediaStream[]> {
   return result.get().mediaItem?.streams ?? [];
 }
 
+describe('JellyfinApiClient bitrate metadata', () => {
+  it('retains the source total, individual track rates and file-grain measurement inputs', async () => {
+    const client = makeMinimalJellyfinClient();
+    vi.spyOn(client, 'getRawItem').mockResolvedValue(
+      Result.success(movieWithExternalSubtitles as never),
+    );
+    const result = await client.getMovie(ITEM_ID);
+    expect(result.isSuccess()).toBe(true);
+    const media = result.get().mediaItem;
+    expect(media).toMatchObject({ bitrate: 26261316, container: 'mkv' });
+    expect(media?.locations[0]).toMatchObject({
+      sizeBytes: 22210344622,
+      duration: 7947520,
+    });
+    expect(media?.streams.find((s) => s.index === 0)).toMatchObject({
+      bitrate: 22357006,
+      hasAttachedPicture: false,
+    });
+    expect(media?.streams.find((s) => s.index === 1)?.bitrate).toBe(3904310);
+    expect(media?.streams.find((s) => s.index === 7)).toMatchObject({
+      streamType: 'video',
+      codec: 'mjpeg',
+      hasAttachedPicture: true,
+    });
+  });
+});
+
 // Real /Items response for a movie whose two English SRT sidecars are reported
 // by Jellyfin as external streams at container indexes 0 and 1, ahead of the
 // video (2), audio (3) and five embedded PGS subtitle streams (4-8).

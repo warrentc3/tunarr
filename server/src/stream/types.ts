@@ -5,8 +5,13 @@ import type { Maybe } from '../types/util.ts';
 
 export type StreamDetails = {
   duration: Duration;
-  // This is the total bitrate
+  // Source-reported total bitrate, in bits per second.
   bitrate?: number;
+  sourceSizeBytes?: number;
+  sourceFileDurationMs?: number;
+  sourceContainer?: string;
+  // Evaluated estimate for Direct v2's copied HLS output, in bits per second.
+  hlsDirectBitrate?: number;
 
   // If defined, there is at least one video stream
   videoDetails?: NonEmptyArray<VideoStreamDetails>;
@@ -35,6 +40,7 @@ export type VideoStreamDetails = {
   displayAspectRatio: string;
   anamorphic: Maybe<boolean>;
   bitrate: Maybe<number>;
+  statisticsBitrate?: number;
   isAttachedPic: Maybe<boolean>;
   colorRange: Maybe<string>;
   colorSpace: Maybe<string>;
@@ -47,6 +53,7 @@ export type AudioStreamDetails = {
   codec?: string;
   index: number;
   bitrate?: number;
+  statisticsBitrate?: number;
   profile?: string;
   default?: boolean;
   selected?: boolean;
@@ -162,9 +169,30 @@ export type SubtitleRenditionInfo = {
   default: boolean;
   forced: boolean;
   title?: string;
+  sdh?: boolean;
+  nativeHls?: boolean;
+};
+
+/** A text subtitle choice published as its own Direct v2 WebVTT rendition. */
+export type DirectSubtitleRenditionInfo = SubtitleRenditionInfo & {
+  /** Stable channel subtitle slot identity. */
+  id: string;
+  playlistName: string;
+  segmentPrefix: string;
+  autoSelect?: boolean;
+};
+
+/** Frozen channel catalogue; programme input availability does not change it. */
+export type DirectSubtitleSlot = DirectSubtitleRenditionInfo & {
+  kind: 'regular' | 'sdh' | 'forced';
+  title: string;
+  autoSelect: boolean;
 };
 
 export type StreamRenditions = {
   audio: AudioRenditionInfo[];
   subtitle?: SubtitleRenditionInfo;
+  /** Defined (including an empty array) for Direct v2 sidecar publication. */
+  subtitles?: DirectSubtitleRenditionInfo[];
+  nativeSubtitleOutput?: boolean;
 };

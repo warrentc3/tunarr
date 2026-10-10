@@ -1,0 +1,5 @@
+These are native FFmpeg 7.1.1 playlist snapshots from the local `builder-fixed-slots-v2` control, recorded October 8, 2026. Three consecutive producers used a 20-entry native HLS window: populated subtitles, empty subtitle inputs, then populated subtitles again. The original Rain media supplied A/V; 40-second control outputs were used to inspect muxer behavior, not to adjudicate natural playback.
+
+The snapshots retain FFmpeg's inherited `.` subtitle URIs, missing subtitle discontinuities, and subtitle ENDLIST tags. Regression tests repair only restart metadata and those lost URI values. Segment count, ordering, EXTINF values, media sequence, and timestamps remain FFmpeg's output.
+
+The `rolled-` snapshots are a separate 100-second then 40-second restart control. Its first window begins at sequence 5; the returned window begins at 15 and contains only the producer boundary at 25. This ruled out interpreting the sequence-zero duplicate marker in the first control as a general mid-programme discontinuity defect.

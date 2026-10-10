@@ -1,4 +1,5 @@
 import type { ISettingsDB } from '@/db/interfaces/ISettingsDB.js';
+import type { IChannelDB } from '@/db/interfaces/IChannelDB.js';
 import type { ChannelOrmWithTranscodeConfig } from '@/db/schema/derivedTypes.js';
 import type { FfmpegTranscodeSession } from '@/ffmpeg/FfmpegTrancodeSession.js';
 import { GetLastPtsDurationTask } from '@/ffmpeg/GetLastPtsDuration.js';
@@ -14,13 +15,15 @@ import type { StreamProgramCalculator } from '@/stream/StreamProgramCalculator.j
 import type { HlsSlowerSession } from '@/stream/hls/HlsSlowerSession.js';
 import type {
   AudioRenditionInfo,
+  DirectSubtitleRenditionInfo,
+  DirectSubtitleSlot,
   SubtitleRenditionInfo,
 } from '@/stream/types.js';
 import { Result } from '@/types/result.js';
 import type { Maybe } from '@/types/util.js';
-import { fileExists } from '@/util/fsUtil.js';
-import { wait } from '@/util/index.js';
+import { isNodeError, wait } from '@/util/index.js';
 import { seq } from '@tunarr/shared/util';
+import { Mutex } from 'async-mutex';
 import type { Dayjs } from 'dayjs';
 import dayjs from 'dayjs';
 import { filter, isEmpty, last, maxBy, sortBy } from 'lodash-es';
@@ -28,6 +31,7 @@ import fs from 'node:fs/promises';
 import path, { basename, dirname, extname } from 'node:path';
 import type { DeepRequired } from 'ts-essentials';
 import type { ProgramStreamFactory } from '../ProgramStreamFactory.ts';
+import type { ProgramStream } from '../ProgramStream.ts';
 import type { BaseHlsSessionOptions } from './BaseHlsSession.js';
 import { BaseHlsSession, SegmentNameRegex } from './BaseHlsSession.js';
 import { HlsMasterPlaylistMutator } from './HlsMasterPlaylistMutator.js';
@@ -36,6 +40,9 @@ import type {
   HlsPlaylistFilterOptions,
 } from './HlsPlaylistMutator.js';
 import { HlsPlaylistMutator } from './HlsPlaylistMutator.js';
+import { HlsNativePlaylistBridge } from './HlsNativePlaylistBridge.ts';
+import { createDirectSubtitleSlots } from '../../ffmpeg/DirectSubtitleSlots.ts';
+import type { FeatureFlagService } from '../../services/FeatureFlagService.ts';
 
 export type HlsSessionProvider = (
   channel: ChannelOrmWithTranscodeConfig,
@@ -59,18 +66,25 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
   #playlistStart?: Dayjs;
   #hlsPlaylistMutator: HlsPlaylistMutator = new HlsPlaylistMutator();
   #currentSession: Maybe<FfmpegTranscodeSession>;
+  #currentProgramStream: ProgramStream | undefined;
   #lastDelete: Dayjs = dayjs().subtract(1, 'year');
   #lastSubtitleDelete: Dayjs = dayjs().subtract(1, 'year');
-  // Every video segment numbered below this has been deleted. ffmpeg's
-  // stream.m3u8 still lists them, so trimmed playlists must start at or above
-  // the floor. Subtitles need no floor. Their muxer keeps a 20-entry window
-  // (HlsSubtitleOutputFormat), and that window is also the deletion boundary,
-  // so subs.m3u8 never lists a pruned .vtt.
+  // Legacy HLS retains an append-only source playlist and needs a pruning
+  // floor. Direct v2 serves FFmpeg's native rolling media window instead.
   #segmentFloor = 0;
   #isFirstTranscode = true;
   #lastDiscontinuitySequence: number | undefined;
   #currentSubtitleRendition: SubtitleRenditionInfo | undefined;
+  #currentDirectSubtitleRenditions: DirectSubtitleRenditionInfo[] | undefined;
   #currentAudioRenditions: AudioRenditionInfo[] = [];
+  // Startup holds the lifecycle lock until FFmpeg has output. Native restart
+  // metadata is captured before launching that producer under a separate lock.
+  #subtitlePlaylistLock = new Mutex();
+  #directSubtitleSlots: readonly DirectSubtitleSlot[] = [];
+  #nativePlaylistBridge = new HlsNativePlaylistBridge([]);
+  #nativeMaxPlaylistDurationMs = 0;
+  #nativeMaxSegmentDurationMs = 0;
+  #nativeSegmentRetiredAt = new Map<string, number>();
 
   constructor(
     channel: ChannelOrmWithTranscodeConfig,
@@ -79,6 +93,8 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
     private settingsDB: ISettingsDB,
     private onDemandService: OnDemandChannelService,
     private programStreamFactory: ProgramStreamFactory,
+    private channelDB?: IChannelDB,
+    private featureFlagService?: FeatureFlagService,
   ) {
     super(channel, options);
   }
@@ -93,10 +109,8 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
 
   async getMasterPlaylist(): Promise<Result<string | undefined>> {
     return Result.attemptAsync(async () => {
-      if (!(await fileExists(this._masterPlaylistPath))) {
-        return undefined;
-      }
-      const content = await fs.readFile(this._masterPlaylistPath, 'utf-8');
+      const content = await this.readPlaylistContents(this._masterPlaylistPath);
+      if (content === undefined) return undefined;
       const rendition = this.#currentSubtitleRendition;
       const hlsOptions = this.getHlsOptions();
       const lines = HlsMasterPlaylistMutator.rewriteVariantPlaylistUrls(
@@ -104,12 +118,29 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
         rendition,
         hlsOptions,
       );
-      if (rendition) {
-        HlsMasterPlaylistMutator.injectSubtitleMediaTag(
+      if (this.#currentDirectSubtitleRenditions !== undefined) {
+        HlsMasterPlaylistMutator.replaceDirectSubtitleMediaTags(
           lines,
-          rendition,
+          this.#currentDirectSubtitleRenditions,
           hlsOptions,
         );
+      } else if (rendition) {
+        const nativeEntryUpdated =
+          this.sessionOptions.streamMode === 'hls_direct_v2' &&
+          HlsMasterPlaylistMutator.augmentNativeSubtitleMediaTag(
+            lines,
+            rendition,
+          );
+        if (!nativeEntryUpdated && !rendition.nativeHls) {
+          HlsMasterPlaylistMutator.injectSubtitleMediaTag(
+            lines,
+            rendition,
+            hlsOptions,
+          );
+        }
+      } else if (this.sessionOptions.streamMode === 'hls_direct_v2') {
+        // The previous producer's master can still exist during a no-text period.
+        HlsMasterPlaylistMutator.removeSubtitleMediaTag(lines);
       }
       if (this.#currentAudioRenditions.length > 0) {
         HlsMasterPlaylistMutator.injectAudioMediaTags(
@@ -123,26 +154,16 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
   }
 
   async trimPlaylist(filterOpts?: HlsPlaylistFilterOptions) {
-    filterOpts ??= {
-      type: 'before_segment_number',
-      segmentNumber: this.minSegmentRequested,
-      segmentsToKeepBefore: 10,
-      segmentFloor: this.#segmentFloor,
-    };
+    if (this.sessionType === 'hls_direct_v2') {
+      return this.readNativeVideoPlaylist();
+    }
     return Result.attemptAsync(async () => {
       return await this.lock.runExclusive(async () => {
         const playlistLines = await this.readPlaylist();
         if (playlistLines) {
-          const trimResult = this.#hlsPlaylistMutator.trimPlaylist(
-            this.#playlistStart!,
-            filterOpts,
+          const trimResult = this.selectVideoPlaylist(
             playlistLines,
-            {
-              maxSegmentsToKeep: 20,
-              targetDuration: this.getHlsOptions().hlsTime,
-              previousDiscontinuitySequence: this.#lastDiscontinuitySequence,
-              endWithDiscontinuity: false,
-            },
+            filterOpts,
           );
           this.#lastDiscontinuitySequence = trimResult.discontinuitySequence;
           const now = dayjs();
@@ -178,40 +199,221 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
     });
   }
 
-  async trimSubtitlePlaylist(filterOpts?: FilterBeforeSegmentNumber) {
+  private selectVideoPlaylist(
+    playlistLines: string[],
+    filterOpts: HlsPlaylistFilterOptions = {
+      type: 'before_segment_number',
+      segmentNumber: this.minSegmentRequested,
+      segmentsToKeepBefore: 10,
+      segmentFloor: this.#segmentFloor,
+    },
+  ) {
+    const playlistStart = this.#playlistStart;
+    if (playlistStart === undefined) {
+      throw new Error('HLS playlist start is not initialized');
+    }
+    let targetDuration = this.getHlsOptions().hlsTime;
+    if (this.sessionOptions.streamMode === 'hls_direct_v2') {
+      for (const line of playlistLines) {
+        // Copied segments end at source keyframes, not the nominal hls_time.
+        // Preserve FFmpeg's target and cover each actual EXTINF rounded to the
+        // nearest integer, as required by the HLS target-duration contract.
+        const target = /^#EXT-X-TARGETDURATION:(\d+)/.exec(line)?.[1];
+        const duration = /^#EXTINF:([^,]+)/.exec(line)?.[1];
+        const value =
+          target !== undefined
+            ? Number(target)
+            : duration !== undefined
+              ? Math.round(Number(duration))
+              : undefined;
+        if (
+          value !== undefined &&
+          Number.isFinite(value) &&
+          value > targetDuration
+        ) {
+          targetDuration = value;
+        }
+      }
+    }
+    return this.#hlsPlaylistMutator.trimPlaylist(
+      playlistStart,
+      filterOpts,
+      playlistLines,
+      {
+        maxSegmentsToKeep: 20,
+        targetDuration,
+        previousDiscontinuitySequence: this.#lastDiscontinuitySequence,
+        endWithDiscontinuity: false,
+      },
+    );
+  }
+
+  isSubtitlePlaylist(filename: string): boolean {
+    return this.sessionType === 'hls_direct_v2'
+      ? this.#directSubtitleSlots.some((slot) => slot.playlistName === filename)
+      : filename === this.getHlsOptions().subtitleStreamNameFormat;
+  }
+
+  override onSegmentRequested(clientIp: string, filename: string) {
+    const file = basename(filename);
+    const slot = file.endsWith('.vtt')
+      ? this.#directSubtitleSlots.find(
+          (candidate) =>
+            file.startsWith(candidate.segmentPrefix) &&
+            /^\d+\.vtt$/.test(file.slice(candidate.segmentPrefix.length)),
+        )
+      : undefined;
+    super.onSegmentRequested(clientIp, filename, slot?.id);
+  }
+
+  async trimSubtitlePlaylist(
+    filterOpts?: FilterBeforeSegmentNumber,
+    filename = this.getHlsOptions().subtitleStreamNameFormat,
+  ) {
+    if (this.sessionType === 'hls_direct_v2') {
+      return Result.attemptAsync(() =>
+        this.#subtitlePlaylistLock.runExclusive(async () => {
+          if (!this.isSubtitlePlaylist(filename)) return;
+          const video = await this.readPlaylist();
+          if (video) this.#nativePlaylistBridge.repairVideo(video);
+          const subtitle = await this.readSubtitlePlaylist(filename);
+          if (!subtitle) return;
+          return this.nativePlaylistResult(
+            this.#nativePlaylistBridge.repairSubtitles(filename, subtitle),
+          );
+        }),
+      );
+    }
     filterOpts ??= {
       type: 'before_segment_number',
       segmentNumber: this.minSubtitleSegmentRequested,
       segmentsToKeepBefore: 10,
     };
-    return Result.attemptAsync(async () => {
-      return await this.lock.runExclusive(async () => {
-        const playlistLines = await this.readSubtitlePlaylist();
-        if (playlistLines) {
-          const trimResult = this.#hlsPlaylistMutator.trimSubtitlePlaylist(
-            playlistLines,
-            filterOpts,
-            { maxSegmentsToKeep: 20 },
-          );
-
-          const now = dayjs();
-          if (now.isAfter(this.#lastSubtitleDelete.add(30, 'seconds'))) {
-            this.deleteOldSegmentFiles(trimResult.sequence, ['.vtt']).catch(
-              (e) => this.logger.error(e),
-            );
-            this.#lastSubtitleDelete = now;
-          }
-
-          return trimResult;
-        }
-
-        this.logger.trace(
-          'No subtitle playlist for HLS sessions at %s',
-          this._subtitlePlaylistPath,
+    return Result.attemptAsync(() =>
+      this.lock.runExclusive(async () => {
+        const lines = await this.readSubtitlePlaylist(filename);
+        if (!lines) return;
+        const result = this.#hlsPlaylistMutator.trimSubtitlePlaylist(
+          lines,
+          filterOpts,
+          { maxSegmentsToKeep: 20 },
         );
-        return;
-      });
-    });
+        const now = dayjs();
+        if (now.isAfter(this.#lastSubtitleDelete.add(30, 'seconds'))) {
+          this.deleteOldSegmentFiles(result.sequence, ['.vtt']).catch((error) =>
+            this.logger.error(error),
+          );
+          this.#lastSubtitleDelete = now;
+        }
+        return result;
+      }),
+    );
+  }
+
+  private nativePlaylistResult(lines: string[]) {
+    let playlistDurationMs = 0;
+    for (const line of lines) {
+      if (line.startsWith('#EXTINF:')) {
+        const durationMs = Number(line.slice(8).split(',')[0]) * 1000;
+        if (Number.isFinite(durationMs) && durationMs > 0) {
+          playlistDurationMs += durationMs;
+          this.#nativeMaxSegmentDurationMs = Math.max(
+            this.#nativeMaxSegmentDurationMs,
+            durationMs,
+          );
+        }
+      } else if (line.trim() && !line.startsWith('#')) {
+        this.#nativeSegmentRetiredAt.delete(basename(line.trim()));
+      }
+    }
+    this.#nativeMaxPlaylistDurationMs = Math.max(
+      this.#nativeMaxPlaylistDurationMs,
+      playlistDurationMs,
+    );
+    return {
+      playlist: lines.join('\n'),
+      sequence: Number(
+        lines
+          .find((line) => line.startsWith('#EXT-X-MEDIA-SEQUENCE:'))
+          ?.split(':')[1] ?? 0,
+      ),
+      segmentCount: lines.filter((line) => line.startsWith('#EXTINF:')).length,
+      discontinuitySequence: Number(
+        lines
+          .find((line) => line.startsWith('#EXT-X-DISCONTINUITY-SEQUENCE:'))
+          ?.split(':')[1] ?? 0,
+      ),
+    };
+  }
+
+  private async readNativeVideoPlaylist() {
+    return Result.attemptAsync(() =>
+      this.#subtitlePlaylistLock.runExclusive(async () => {
+        const video = await this.readPlaylist();
+        if (!video) return;
+        const result = this.nativePlaylistResult(
+          this.#nativePlaylistBridge.repairVideo(video),
+        );
+        const now = dayjs();
+        if (now.isAfter(this.#lastDelete.add(30, 'seconds'))) {
+          await this.pruneNativeSegments(result.sequence);
+          this.#lastDelete = now;
+        }
+        return result;
+      }),
+    );
+  }
+
+  private async pruneNativeSegments(videoSequence: number) {
+    const floors = new Map<string, number>();
+    for (const slot of this.#directSubtitleSlots) {
+      const lines = await this.readSubtitlePlaylist(slot.playlistName);
+      if (!lines) continue;
+      const repaired = this.nativePlaylistResult(
+        this.#nativePlaylistBridge.repairSubtitles(slot.playlistName, lines),
+      );
+      floors.set(slot.segmentPrefix, repaired.sequence);
+    }
+    const files = await fs.readdir(this._workingDirectory);
+    const now = Date.now();
+    // RFC 8216 6.2.2 retains a removed segment for its duration plus the
+    // longest distributed playlist containing it. Session-wide maxima are
+    // conservative; file mtime cannot tell when a URI left a served window.
+    const retentionMs =
+      this.#nativeMaxPlaylistDurationMs + this.#nativeMaxSegmentDurationMs;
+    for (const filename of files) {
+      const video = /^data(\d+)\.(ts|mp4)$/.exec(filename);
+      let expired = video !== null && Number(video[1]) < videoSequence;
+      if (!expired && filename.endsWith('.vtt')) {
+        for (const [prefix, floor] of floors) {
+          const suffix = filename.startsWith(prefix)
+            ? filename.slice(prefix.length)
+            : '';
+          if (
+            /^\d+\.vtt$/.test(suffix) &&
+            Number.parseInt(suffix, 10) < floor
+          ) {
+            expired = true;
+            break;
+          }
+        }
+      }
+      if (!expired) {
+        this.#nativeSegmentRetiredAt.delete(filename);
+        continue;
+      }
+      const retiredAt = this.#nativeSegmentRetiredAt.get(filename);
+      if (retiredAt === undefined) {
+        this.#nativeSegmentRetiredAt.set(filename, now);
+      } else if (now - retiredAt >= retentionMs) {
+        try {
+          await fs.unlink(path.join(this._workingDirectory, filename));
+          this.#nativeSegmentRetiredAt.delete(filename);
+        } catch (error) {
+          this.logger.error(error);
+        }
+      }
+    }
   }
 
   protected async startInternal() {
@@ -220,6 +422,24 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
     }
 
     await this.initDirectories();
+
+    if (this.sessionType === 'hls_direct_v2') {
+      const enabled =
+        this.channel.subtitlesEnabled &&
+        this.featureFlagService?.get('webvttSidecarEnabled');
+      const preferences = enabled
+        ? ((await this.channelDB?.getChannelSubtitlePreferences(
+            this.channel.uuid,
+          )) ?? [])
+        : [];
+      this.#directSubtitleSlots = createDirectSubtitleSlots(
+        preferences.map((preference) => preference.languageCode),
+      );
+      this.#currentDirectSubtitleRenditions = [...this.#directSubtitleSlots];
+      this.#nativePlaylistBridge = new HlsNativePlaylistBridge(
+        this.#directSubtitleSlots.map((slot) => slot.playlistName),
+      );
+    }
 
     this.state = 'started';
     this.#playlistStart = this.transcodedUntil = dayjs();
@@ -269,18 +489,15 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
   }
 
   private async transcode(realtime: boolean) {
-    const ptsOffset =
-      this.#isFirstTranscode ||
-      this.sessionOptions.streamMode === 'hls_direct_v2'
-        ? 0
-        : await this.getPtsOffset();
-    // Unlike ptsOffset, this applies regardless of isFirstTranscode/
-    // streamMode: scanning a fresh/empty working directory already
-    // naturally yields 0, and hls_direct_v2's subs.m3u8 has the same
-    // restart-numbering problem as hls (only the video/audio -copyts
-    // handling is hls_direct_v2-specific).
+    // Keep one channel clock even when the next programme is stream-copied.
+    // Discontinuities still signal decoder changes; they need not reset PTS.
+    const ptsOffset = this.#isFirstTranscode ? 0 : await this.getPtsOffset();
+    // Native Direct outputs continue their own FFmpeg append lists. Only the
+    // legacy segment-muxer output needs an explicit subtitle start number.
     const subtitleSegmentStartNumber =
-      await this.getLastSubtitleSegmentNumber();
+      this.sessionType === 'hls_direct_v2'
+        ? undefined
+        : await this.getLastSubtitleSegmentNumber();
 
     const lineupItemResult = await this.programCalculator.getCurrentLineupItem({
       allowSkip: true,
@@ -313,14 +530,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
         ptsOffset,
         subtitleSegmentStartNumber,
       );
-
-      programStream.on('error', () => {
-        this.state = 'error';
-        this.error = new Error(
-          `Unrecoverable error in underlying FFMPEG process`,
-        );
-        this.emit('error', this.error);
-      });
+      this.#currentProgramStream = programStream;
 
       let transcodeSessionResult = await programStream.setup();
 
@@ -343,6 +553,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
           ptsOffset,
           subtitleSegmentStartNumber,
         );
+        this.#currentProgramStream = programStream;
 
         transcodeSessionResult = await programStream.setup();
 
@@ -365,6 +576,10 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
         );
         this.#currentSession = transcodeSession;
         this.#currentSubtitleRendition = programStream.renditions?.subtitle;
+        this.#currentDirectSubtitleRenditions =
+          this.sessionType === 'hls_direct_v2'
+            ? [...this.#directSubtitleSlots]
+            : undefined;
         this.#currentAudioRenditions = programStream.renditions?.audio ?? [];
       });
 
@@ -372,7 +587,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
         // await this.trimPlaylistAndDeleteSegments();
       }
       await programStream.start();
-      return programStream.transcodeSession!.wait();
+      return programStream.wait();
     });
 
     if (transcodeResult.isFailure()) {
@@ -386,6 +601,11 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
   }
 
   protected override getAdditionalRequiredFiles(): string[] {
+    if (this.#currentDirectSubtitleRenditions !== undefined) {
+      return this.#currentDirectSubtitleRenditions.map(
+        (rendition) => rendition.playlistName,
+      );
+    }
     return this.#currentSubtitleRendition
       ? [this.getHlsOptions().subtitleStreamNameFormat]
       : [];
@@ -401,7 +621,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       streamBasePath: basename(this.workingDirectory),
       streamBaseUrl: `/stream/channels/${this.channel.uuid}/${this.sessionType}/`,
       hlsTime: 4,
-      hlsListSize: 0,
+      hlsListSize: this.sessionType === 'hls_direct_v2' ? 20 : 0,
       deleteThreshold: null,
       appendSegments: true,
     };
@@ -419,11 +639,54 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
         ? HlsDirectOutputFormat(hlsOptions)
         : HlsOutputFormat(hlsOptions);
 
-    return this.programStreamFactory(context, outputFormat, {
+    const stream = this.programStreamFactory(context, outputFormat, {
       ptsOffset,
       isFirstTranscode: this.#isFirstTranscode,
       subtitleSegmentStartNumber,
+      directSubtitleSlots:
+        this.sessionType === 'hls_direct_v2'
+          ? this.#directSubtitleSlots
+          : undefined,
+      beforeProducerStart:
+        this.sessionType === 'hls_direct_v2'
+          ? async (session, renditions) => {
+              return this.#subtitlePlaylistLock.runExclusive(async () => {
+                if (this.state !== 'started') return false;
+                const previousVideo = await this.readPlaylist();
+                if (previousVideo) {
+                  this.#nativePlaylistBridge.repairVideo(previousVideo);
+                  // Every producer, including an error replacement, snapshots
+                  // finalized native URIs before FFmpeg's append reader loses them.
+                  for (const slot of this.#directSubtitleSlots) {
+                    const previous = await this.readSubtitlePlaylist(
+                      slot.playlistName,
+                    );
+                    if (previous)
+                      this.#nativePlaylistBridge.repairSubtitles(
+                        slot.playlistName,
+                        previous,
+                      );
+                  }
+                  this.#nativePlaylistBridge.beginProgram(
+                    this.#nativePlaylistBridge.nextSequence(previousVideo),
+                  );
+                }
+                if (this.state !== 'started') return false;
+                this.#currentSession = session;
+                this.#currentAudioRenditions = renditions?.audio ?? [];
+                return true;
+              });
+            }
+          : undefined,
     });
+    stream.on('error', () => {
+      this.state = 'error';
+      this.error = new Error(
+        'Unrecoverable error in underlying FFMPEG process',
+      );
+      this.emit('error', this.error);
+    });
+    return stream;
   }
 
   private async getPtsOffset() {
@@ -514,46 +777,54 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
     return isEmpty(remainingConnections);
   }
 
-  private get _subtitlePlaylistPath() {
-    return path.join(
-      this._workingDirectory,
-      this.getHlsOptions().subtitleStreamNameFormat,
+  private async readPlaylist() {
+    return (await this.readPlaylistContents(this._m3u8PlaylistPath))?.split(
+      '\n',
     );
   }
 
-  private async readPlaylist() {
-    if (!(await fileExists(this._m3u8PlaylistPath))) {
-      return;
-    }
-
-    const playlistContents = await fs.readFile(this._m3u8PlaylistPath, {
-      encoding: 'utf-8',
-    });
-
-    return playlistContents.toString().split('\n');
+  private async readSubtitlePlaylist(
+    filename = this.getHlsOptions().subtitleStreamNameFormat,
+  ) {
+    const playlistPath = path.join(this._workingDirectory, filename);
+    return (await this.readPlaylistContents(playlistPath))?.split('\n');
   }
 
-  private async readSubtitlePlaylist() {
-    if (!(await fileExists(this._subtitlePlaylistPath))) {
-      return;
+  private async readPlaylistContents(filename: string) {
+    // FFmpeg replaces live playlists through a temporary file. Some mounted
+    // filesystems expose a short ENOENT window even after a successful stat.
+    // Read directly and allow Direct v2 up to 100 ms for that replacement;
+    // persistent absence stays absent, and other I/O errors still propagate.
+    const retries = this.sessionType === 'hls_direct_v2' ? 4 : 0;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fs.readFile(filename, 'utf-8');
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+        if (attempt >= retries) return undefined;
+        await wait(25);
+      }
     }
-
-    const playlistContents = await fs.readFile(this._subtitlePlaylistPath, {
-      encoding: 'utf-8',
-    });
-
-    return playlistContents.toString().split('\n');
   }
 
   private async deleteOldSegmentFiles(
     sequenceNum: number,
     extensions: string[],
+    subtitlePrefix?: string,
+    workingDirectoryFiles?: string[],
   ) {
-    const workingDirectoryFiles = await fs.readdir(this._workingDirectory);
+    workingDirectoryFiles ??= await fs.readdir(this._workingDirectory);
     const segments = filter(
       seq.collect(
         filter(workingDirectoryFiles, (f) => extensions.includes(extname(f))),
         (file) => {
+          if (
+            subtitlePrefix !== undefined &&
+            (!file.startsWith(subtitlePrefix) ||
+              !/^\d+\.vtt$/.test(file.slice(subtitlePrefix.length)))
+          ) {
+            return;
+          }
           const matches = file.match(SegmentNameRegex);
           if (!matches || matches.length < 2) {
             return;
@@ -579,19 +850,25 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       );
     }
 
+    let allDeleted = true;
     for (const { file } of segments) {
       try {
         await fs.unlink(path.join(this._workingDirectory, file));
       } catch (e) {
+        allDeleted = false;
         this.logger.error(e);
       }
     }
+    return allDeleted;
   }
 
   protected async stopStream(options: StopOptions): Promise<void> {
-    if (this.#currentSession) {
-      this.#currentSession.kill();
-      await this.waitForExit(this.#currentSession, options);
+    const current =
+      this.#currentProgramStream?.transcodeSession ?? this.#currentSession;
+    if (this.#currentProgramStream) this.#currentProgramStream.shutdown();
+    else current?.kill();
+    if (current) {
+      await this.waitForExit(current, options);
     }
 
     this.logger.debug(
@@ -599,6 +876,11 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       this._workingDirectory,
     );
 
+    if (this.sessionOptions.streamMode === 'hls_direct_v2') {
+      return await this.#subtitlePlaylistLock.runExclusive(() =>
+        this.cleanupDirectory(),
+      );
+    }
     return await this.cleanupDirectory();
   }
 }

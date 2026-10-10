@@ -2,6 +2,7 @@ import { faker } from '@faker-js/faker';
 import { describe, expect, it, vi } from 'vitest';
 import { Result } from '@/types/result.js';
 import { PlexApiClient } from './PlexApiClient.js';
+import type { PlexMovie } from '@tunarr/types/plex';
 
 const { fakeLogger } = vi.hoisted(() => {
   const fakeLogger = {
@@ -94,6 +95,63 @@ function makePlexMovieMetadata(ratingKey: string, librarySectionID: number) {
     ],
   };
 }
+
+describe('Plex media bitrate metadata', () => {
+  function metadata(): PlexMovie {
+    const movie = makePlexMovieMetadata('1', 1);
+    return {
+      ...movie,
+      Media: movie.Media.map((media) => ({
+        ...media,
+        Part: media.Part.map((part) => ({
+          ...part,
+          Stream: [
+            {
+              streamType: 1,
+              index: 0,
+              codec: 'h264',
+              width: 1920,
+              height: 1080,
+              bitrate: 7500,
+            },
+            { streamType: 2, index: 1, codec: 'aac', bitrate: 128 },
+          ],
+        })),
+      })),
+    } as PlexMovie;
+  }
+
+  it('normalizes kilobits/second while retaining source and track rates separately', () => {
+    const { client } = makeMinimalPlexClient();
+    const result = client.plexMediaStreamsInject('1', metadata());
+    expect(result.isSuccess()).toBe(true);
+    const media = result.get();
+    expect(media.bitrate).toBe(8000000);
+    expect(media.streams.map((stream) => stream.bitrate)).toEqual([
+      7500000, 128000,
+    ]);
+    expect(media.locations[0]).toMatchObject({
+      sizeBytes: 1000000000,
+      duration: 7200000,
+    });
+  });
+
+  it('does not pair one part size with the duration of a multipart media item', () => {
+    const { client } = makeMinimalPlexClient();
+    const movie = metadata();
+    const media = movie.Media?.[0];
+    const part = media?.Part[0];
+    if (!media || !part) {
+      throw new Error('Test fixture requires a media part');
+    }
+    part.duration = undefined;
+    media.Part.push({ ...part, id: 2, size: 2000000000 });
+    const result = client.plexMediaStreamsInject('1', movie);
+    expect(result.isSuccess()).toBe(true);
+    expect(result.get().locations[0]).toMatchObject({ sizeBytes: 1000000000 });
+    expect(result.get().locations[0]?.duration).toBeUndefined();
+  });
+});
 
 /**
  * Serves `allMetadata` the way a Plex server does: honoring

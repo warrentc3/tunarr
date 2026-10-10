@@ -229,13 +229,28 @@ export default function ChannelTranscodingConfig() {
             <Collapse in={subtitlesEnabled}>
               <Divider sx={{ my: 2 }} />
               <Typography>
-                <Trans>
-                  Configure subtitle preferences. Preferences are evaluated in
-                  order of priority. The first matching subtitle stream on a
-                  program will be used.
-                </Trans>
+                {streamMode === 'hls_direct_v2' ? (
+                  <Trans>
+                    Choose subtitle languages in priority order. With no
+                    languages, subtitles are disabled. Each language has
+                    Regular, SDH and Forced options for the whole channel. SDH
+                    copies Regular when no SDH track exists; SDH-only also fills
+                    Regular. Forced is empty when absent. Regular and SDH are
+                    empty only when neither track exists. Embedded and adjacent
+                    text tracks are considered together. Enable sidecar
+                    subtitles under Settings &gt; Features.
+                  </Trans>
+                ) : (
+                  <Trans>
+                    Configure subtitle preferences. Preferences are evaluated in
+                    order of priority. The first matching subtitle stream on a
+                    program will be used.
+                  </Trans>
+                )}
               </Typography>
-              <ChannelSubtitlePreferencesTable />
+              <ChannelSubtitlePreferencesTable
+                languageFilterOnly={streamMode === 'hls_direct_v2'}
+              />
             </Collapse>
           </Stack>
         </Stack>

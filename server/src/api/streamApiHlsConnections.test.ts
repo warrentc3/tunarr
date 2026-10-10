@@ -51,6 +51,14 @@ class TestHlsSession extends BaseHlsSession {
     return Result.success({ playlist: VARIANT_PLAYLIST });
   }
 
+  isSubtitlePlaylist(filename: string) {
+    return filename === 'subs.m3u8' || filename === 'subtitle_a12.m3u8';
+  }
+
+  async trimSubtitlePlaylist(_filter: unknown, filename: string) {
+    return Result.success({ playlist: `#EXTM3U\n# selected ${filename}\n` });
+  }
+
   protected getHlsOptions(): DeepRequired<HlsOptions> {
     return {
       hlsDeleteThreshold: 3,
@@ -221,6 +229,45 @@ describe('streamApi HLS connection registration (issue #2045 invariant)', () => 
 
     expect(res.statusCode).toBe(404);
     expect(session.minByIp.get('203.0.113.10')?.video).toBe(100);
+  });
+
+  it('serves registered subtitle playlists through the session and hides private AV child playlists', async () => {
+    await writeSegments(
+      'subtitle_a12.m3u8',
+      'subtitle_a12_av_.m3u8',
+      'subtitle_unknown.m3u8',
+    );
+    const selected = await app.inject({
+      method: 'GET',
+      url: `/stream/channels/${makeChannel().uuid}/hls_direct_v2/subtitle_a12.m3u8`,
+    });
+    expect(selected.statusCode).toBe(200);
+    expect(selected.body).toContain('# selected subtitle_a12.m3u8');
+    for (const file of ['subtitle_a12_av_.m3u8', 'subtitle_unknown.m3u8']) {
+      const rejected = await app.inject({
+        method: 'GET',
+        url: `/stream/channels/${makeChannel().uuid}/hls_direct_v2/${file}`,
+      });
+      expect(rejected.statusCode).toBe(404);
+    }
+  });
+
+  it('serves bare empty WebVTT with a timestamp-map header and at least 16 bytes', async () => {
+    await writeSegments('subtitle_eng_forced_av_1.vtt');
+    await fs.writeFile(
+      path.join(session.workingDirectory, 'subtitle_eng_forced_av_1.vtt'),
+      'WEBVTT\n',
+    );
+    const response = await app.inject({
+      method: 'GET',
+      url: `/stream/channels/${makeChannel().uuid}/hls_direct_v2/subtitle_eng_forced_av_1.vtt`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('text/vtt');
+    expect(response.body).toBe(
+      'WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n',
+    );
+    expect(Buffer.byteLength(response.body)).toBeGreaterThanOrEqual(16);
   });
 });
 

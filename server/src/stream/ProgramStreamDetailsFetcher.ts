@@ -1,4 +1,5 @@
 import { nullToUndefined, seq } from '@tunarr/shared/util';
+import { FfmpegInfo } from '@/ffmpeg/ffmpegInfo.js';
 import axios from 'axios';
 import dayjs from 'dayjs';
 import { inject, injectable } from 'inversify';
@@ -12,6 +13,7 @@ import {
   trimStart,
 } from 'lodash-es';
 import { match } from 'ts-pattern';
+import { stat } from 'node:fs/promises';
 import type { IProgramDB } from '../db/interfaces/IProgramDB.ts';
 import type { MediaSourceWithRelations } from '../db/schema/derivedTypes.ts';
 import { ArtworkService } from '../services/ArtworkService.ts';
@@ -26,6 +28,7 @@ import type { Logger } from '../util/logging/LoggerFactory.ts';
 import { makeLocalUrl } from '../util/serverUtil.ts';
 import type { StreamFetchRequest } from './ExternalStreamDetailsFetcher.ts';
 import { PathCalculator } from './PathCalculator.ts';
+import { bitrateFromSize, estimateSourceBitrate } from './SourceBitrate.ts';
 import type {
   AudioStreamDetails,
   ProgramStreamResult,
@@ -43,13 +46,17 @@ export class ProgramStreamDetailsFetcher {
 
   constructor(
     @inject(KEYS.ProgramDB) private programDB: IProgramDB,
+    @inject(FfmpegInfo) private ffmpegInfo: FfmpegInfo,
     @inject(ArtworkService) private artworkService: ArtworkService,
   ) {}
 
   async getStream({
     lineupItem,
     server,
-  }: StreamFetchRequest): Promise<Result<ProgramStreamResult>> {
+    requireBitrate = false,
+  }: StreamFetchRequest & { requireBitrate?: boolean }): Promise<
+    Result<ProgramStreamResult>
+  > {
     const program = await this.programDB.getStreamProgramById(lineupItem.uuid);
 
     if (!program) {
@@ -78,33 +85,38 @@ export class ProgramStreamDetailsFetcher {
       firstVersion.displayAspectRatio ??
       `${firstVersion.width}/${firstVersion.height}`;
     const videoStreamDetails =
-      streamsByType['video']?.map(
-        (videoStream) =>
-          ({
-            displayAspectRatio,
-            height: firstVersion.height,
-            sampleAspectRatio: nullToUndefined(firstVersion.sampleAspectRatio),
-            width: firstVersion.width,
-            anamorphic: extractIsAnamorphic(
-              firstVersion.width,
-              firstVersion.height,
+      streamsByType['video']
+        ?.filter((stream) => !stream.hasAttachedPicture)
+        .map(
+          (videoStream) =>
+            ({
               displayAspectRatio,
-            ),
-            bitDepth: nullToUndefined(videoStream.bitsPerSample),
-            codec: videoStream.codec,
-            framerate: nullToUndefined(firstVersion.frameRate),
-            profile: nullToUndefined(videoStream.profile),
-            scanType: nullToUndefined(firstVersion.scanKind),
-            streamIndex: videoStream.index,
-            pixelFormat: nullToUndefined(videoStream.pixelFormat),
-            bitrate: undefined,
-            isAttachedPic: false,
-            colorRange: videoStream.colorRange ?? undefined,
-            colorSpace: videoStream.colorSpace ?? undefined,
-            colorTransfer: videoStream.colorTransfer ?? undefined,
-            colorPrimaries: videoStream.colorPrimaries ?? undefined,
-          }) satisfies VideoStreamDetails,
-      ) ?? [];
+              height: firstVersion.height,
+              sampleAspectRatio: nullToUndefined(
+                firstVersion.sampleAspectRatio,
+              ),
+              width: firstVersion.width,
+              anamorphic: extractIsAnamorphic(
+                firstVersion.width,
+                firstVersion.height,
+                displayAspectRatio,
+              ),
+              bitDepth: nullToUndefined(videoStream.bitsPerSample),
+              codec: videoStream.codec,
+              framerate: nullToUndefined(firstVersion.frameRate),
+              profile: nullToUndefined(videoStream.profile),
+              scanType: nullToUndefined(firstVersion.scanKind),
+              streamIndex: videoStream.index,
+              pixelFormat: nullToUndefined(videoStream.pixelFormat),
+              bitrate: nullToUndefined(videoStream.bitrate),
+              statisticsBitrate: nullToUndefined(videoStream.statisticsBitrate),
+              isAttachedPic: videoStream.hasAttachedPicture ?? false,
+              colorRange: videoStream.colorRange ?? undefined,
+              colorSpace: videoStream.colorSpace ?? undefined,
+              colorTransfer: videoStream.colorTransfer ?? undefined,
+              colorPrimaries: videoStream.colorPrimaries ?? undefined,
+            }) satisfies VideoStreamDetails,
+        ) ?? [];
 
     const audioStreamDetails =
       streamsByType['audio']?.map(
@@ -115,6 +127,8 @@ export class ProgramStreamDetailsFetcher {
             default: audioStream.default,
             forced: audioStream.forced,
             index: audioStream.index,
+            bitrate: nullToUndefined(audioStream.bitrate),
+            statisticsBitrate: nullToUndefined(audioStream.statisticsBitrate),
             languageCodeISO6392: nullToUndefined(audioStream.language),
             profile: nullToUndefined(audioStream.profile),
             title: nullToUndefined(audioStream.title),
@@ -134,9 +148,17 @@ export class ProgramStreamDetailsFetcher {
             codec: subtitle.codec,
             default: subtitle.default,
             forced: subtitle.forced,
-            sdh: false, // TODO:
+            // Accessibility metadata belongs to the subtitle's source record,
+            // regardless of whether its text has been extracted to a cache file.
+            sdh:
+              program.subtitles?.find(
+                (metadata) =>
+                  metadata.subtitleType === 'embedded' &&
+                  metadata.streamIndex === subtitle.index,
+              )?.sdh ?? false,
             type: 'embedded',
             index: subtitle.index,
+            title: nullToUndefined(subtitle.title),
             languageCodeISO6392: nullToUndefined(subtitle.language),
           }) satisfies SubtitleStreamDetails,
       ) ?? [];
@@ -212,6 +234,16 @@ export class ProgramStreamDetailsFetcher {
     );
 
     const streamDetails: StreamDetails = {
+      bitrate: nullToUndefined(firstVersion.bitrate),
+      sourceContainer: nullToUndefined(firstVersion.container),
+      sourceSizeBytes: nullToUndefined(
+        head(firstVersion.mediaFiles)?.sizeBytes,
+      ),
+      // Local version duration describes its one file. Media-server multipart
+      // duration may describe more than the selected file, so require file grain.
+      sourceFileDurationMs:
+        head(firstVersion.mediaFiles)?.duration ??
+        (server.type === 'local' ? firstVersion.duration : undefined),
       audioDetails: isNonEmptyArray(audioStreamDetails)
         ? audioStreamDetails
         : undefined,
@@ -245,6 +277,8 @@ export class ProgramStreamDetailsFetcher {
         path: file.path,
       };
 
+      if (requireBitrate)
+        await this.setBitrateEstimate(streamDetails, streamSource);
       return Result.success({ streamDetails, streamSource });
     } else {
       const filePath = head(firstVersion.mediaFiles)?.path;
@@ -257,7 +291,38 @@ export class ProgramStreamDetailsFetcher {
         filePath,
         serverPath,
       );
+      if (requireBitrate)
+        await this.setBitrateEstimate(streamDetails, streamSource);
       return Result.success({ streamDetails, streamSource });
+    }
+  }
+
+  private async setBitrateEstimate(
+    details: StreamDetails,
+    source: StreamSource,
+  ) {
+    details.hlsDirectBitrate = estimateSourceBitrate(details);
+    if (details.hlsDirectBitrate !== undefined) return;
+
+    // This is only the unfilled-record fallback. Forced scans persist the facts;
+    // normal playback of populated records performs no bitrate measurement.
+    if (source.type === 'file' && details.sourceFileDurationMs !== undefined) {
+      try {
+        const file = await stat(source.path);
+        details.hlsDirectBitrate = bitrateFromSize(
+          file.size,
+          details.sourceFileDurationMs,
+        );
+      } catch {
+        // Let the bounded probe try the same resolved source below.
+      }
+    }
+    if (details.hlsDirectBitrate !== undefined) return;
+    if (source.type === 'file' || source.type === 'http') {
+      details.hlsDirectBitrate = await this.ffmpegInfo.probeSourceBitrate(
+        source.path,
+        source.type === 'http' ? source.extraHeaders : undefined,
+      );
     }
   }
 

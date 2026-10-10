@@ -1294,9 +1294,13 @@ export class EmbyApiClient extends MediaSourceApiClient<EmbyItemTypes> {
       : false;
 
     const streams: MediaStream[] = [];
-    if (videoStream) {
+    for (const videoStream of source.MediaStreams?.filter(
+      (stream) => stream.Type === 'Video' || stream.Type === 'EmbeddedImage',
+    ) ?? []) {
       const videoMediaStream: MediaStream = {
         streamType: 'video',
+        hasAttachedPicture: videoStream.Type === 'EmbeddedImage',
+        bitrate: videoStream.BitRate,
         index: Math.max(0, (videoStream.Index ?? 0) - streamIndexOffset),
         codec: videoStream.Codec ?? 'unknown',
         profile: (videoStream.Profile ?? '')?.toLowerCase(),
@@ -1317,6 +1321,7 @@ export class EmbyApiClient extends MediaSourceApiClient<EmbyItemTypes> {
         (audioStream) => {
           return {
             streamType: 'audio',
+            bitrate: audioStream.BitRate,
             codec: audioStream.Codec ?? 'unknown',
             profile: (audioStream.Profile ?? '').toLowerCase(),
             channels: audioStream.Channels ?? 2,
@@ -1363,6 +1368,8 @@ export class EmbyApiClient extends MediaSourceApiClient<EmbyItemTypes> {
       displayAspectRatio: videoStream?.AspectRatio ?? '',
       sampleAspectRatio: isAnamorphic ? '0:0' : '1:1',
       duration: +dayjs.duration(Math.ceil((source.RunTimeTicks ?? 0) / 10_000)),
+      bitrate: source.Bitrate,
+      container: source.Container,
       frameRate: videoStream?.RealFrameRate?.toFixed(2),
       locations: [
         {
@@ -1370,6 +1377,11 @@ export class EmbyApiClient extends MediaSourceApiClient<EmbyItemTypes> {
           sourceType: 'emby',
           externalKey: item.Id,
           path: source.Path ?? '',
+          sizeBytes: source.Size,
+          duration:
+            source.RunTimeTicks != null
+              ? source.RunTimeTicks / 10_000
+              : undefined,
         },
       ],
       streams,

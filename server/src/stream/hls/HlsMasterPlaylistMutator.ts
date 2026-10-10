@@ -1,5 +1,9 @@
 import { isDefined } from '../../util/index.ts';
-import type { AudioRenditionInfo, SubtitleRenditionInfo } from '../types.ts';
+import type {
+  AudioRenditionInfo,
+  DirectSubtitleRenditionInfo,
+  SubtitleRenditionInfo,
+} from '../types.ts';
 export type { SubtitleRenditionInfo };
 
 type RewriteOptions = {
@@ -10,11 +14,16 @@ type RewriteOptions = {
 type InjectOptions = {
   streamBaseUrl: string;
   subtitleStreamNameFormat: string;
+  autoSelect?: boolean;
 };
 
 export class HlsMasterPlaylistMutator {
   private static readonly _variantPlaylistTag = '#EXT-X-STREAM-INF:';
   private static readonly _mediaTag = '#EXT-X-MEDIA:';
+  private static readonly _sdhCharacteristics: readonly string[] = [
+    'public.accessibility.transcribes-spoken-dialog',
+    'public.accessibility.describes-music-and-sound',
+  ];
 
   static rewriteVariantPlaylistUrls(
     content: string,
@@ -38,6 +47,7 @@ export class HlsMasterPlaylistMutator {
 
       const hasSubtitlesAndIsMissingReference =
         rendition &&
+        !rendition.nativeHls &&
         line.startsWith(this._variantPlaylistTag) &&
         !line.includes('SUBTITLES=');
       return hasSubtitlesAndIsMissingReference
@@ -55,11 +65,122 @@ export class HlsMasterPlaylistMutator {
     const subsUrl = `${streamBaseUrl}${subtitleStreamNameFormat}`;
     const langName = rendition.languageName ?? rendition.language;
     const title = rendition.title ?? langName;
-    const mediaTag = `#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="${rendition.language}",NAME="${title}",DEFAULT=${this.getYesNo(rendition.default)},AUTOSELECT=${this.getYesNo(rendition.default)},FORCED=${this.getYesNo(rendition.forced)},URI="${subsUrl}"`;
+    const characteristics =
+      rendition.sdh === true
+        ? `,CHARACTERISTICS="${this._sdhCharacteristics.join(',')}"`
+        : '';
+    const mediaTag = `#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="${rendition.language}",NAME="${title}",DEFAULT=${this.getYesNo(rendition.default)},AUTOSELECT=${this.getYesNo(options.autoSelect ?? (rendition.default || rendition.sdh === true))},FORCED=${this.getYesNo(rendition.forced)}${characteristics},URI="${subsUrl}"`;
     const insertBefore = lines.findIndex((l) =>
       l.startsWith(this._variantPlaylistTag),
     );
     if (insertBefore >= 0) lines.splice(insertBefore, 0, mediaTag);
+  }
+
+  /**
+   * Publish the channel's fixed text subtitle slots on FFmpeg's existing AV
+   * master. Every slot has a producer output, including empty periods. Labels
+   * describe the channel choices rather than a programme's source filenames.
+   */
+  static replaceDirectSubtitleMediaTags(
+    lines: string[],
+    renditions: readonly DirectSubtitleRenditionInfo[],
+    options: Pick<RewriteOptions, 'streamBaseUrl'>,
+  ): void {
+    this.removeSubtitleMediaTag(lines);
+    if (renditions.length === 0) return;
+    const variantIndex = lines.findIndex((line) =>
+      line.startsWith(this._variantPlaylistTag),
+    );
+    if (variantIndex < 0) return;
+
+    for (const rendition of renditions) {
+      this.injectSubtitleMediaTag(
+        lines,
+        {
+          ...rendition,
+          // HLS quoted-string values cannot contain quotes or line breaks.
+          // Subtitle labels are metadata, never playlist syntax.
+          title: (
+            rendition.title ??
+            rendition.languageName ??
+            rendition.language
+          )
+            .replace(/[\r\n]/g, '')
+            .replaceAll('"', "'"),
+        },
+        {
+          streamBaseUrl: options.streamBaseUrl,
+          subtitleStreamNameFormat: rendition.playlistName,
+          autoSelect: rendition.autoSelect,
+        },
+      );
+    }
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      if (
+        line?.startsWith(this._variantPlaylistTag) &&
+        !line.includes('SUBTITLES=')
+      ) {
+        lines[index] = line + ',SUBTITLES="subs"';
+      }
+    }
+  }
+
+  static augmentNativeSubtitleMediaTag(
+    lines: string[],
+    rendition: SubtitleRenditionInfo,
+  ): boolean {
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      if (line === undefined || !line.startsWith(this._mediaTag)) continue;
+
+      const existing = this.mediaAttributes(line);
+      if (
+        existing.get('TYPE') !== 'SUBTITLES' ||
+        existing.get('GROUP-ID') !== '"subs"'
+      ) {
+        continue;
+      }
+
+      // Direct v2 keeps FFmpeg's subtitle URI/group. Only augment metadata on
+      // that native entry; a missing entry must not become a separate output.
+      const attributes = new Map<string, string | undefined>([
+        [
+          'NAME',
+          `"${rendition.title ?? rendition.languageName ?? rendition.language}"`,
+        ],
+        ['LANGUAGE', `"${rendition.language}"`],
+        ['DEFAULT', this.getYesNo(rendition.default)],
+        [
+          'AUTOSELECT',
+          this.getYesNo(rendition.default || rendition.sdh === true),
+        ],
+        ['FORCED', this.getYesNo(rendition.forced)],
+      ]);
+      const characteristics = (existing.get('CHARACTERISTICS') ?? '')
+        .replace(/^"|"$/g, '')
+        .split(',')
+        .filter(
+          (value) =>
+            value.length > 0 && !this._sdhCharacteristics.includes(value),
+        );
+      if (rendition.sdh === true) {
+        characteristics.push(...this._sdhCharacteristics);
+      }
+      if (characteristics.length > 0 || existing.has('CHARACTERISTICS')) {
+        attributes.set(
+          'CHARACTERISTICS',
+          characteristics.length > 0
+            ? `"${[...new Set(characteristics)].join(',')}"`
+            : undefined,
+        );
+      }
+
+      lines[index] = this.replaceMediaAttributes(line, attributes);
+      return true;
+    }
+
+    return false;
   }
 
   static injectAudioMediaTags(
@@ -107,7 +228,76 @@ export class HlsMasterPlaylistMutator {
     }
   }
 
+  static removeSubtitleMediaTag(lines: string[]): void {
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const line = lines[index];
+      if (line === undefined) continue;
+      if (line.startsWith(this._mediaTag)) {
+        const attributes = this.mediaAttributes(line);
+        if (
+          attributes.get('TYPE') === 'SUBTITLES' &&
+          attributes.get('GROUP-ID') === '"subs"'
+        ) {
+          lines.splice(index, 1);
+        }
+      } else if (line.startsWith(this._variantPlaylistTag)) {
+        lines[index] = line.replace(
+          /(,?)SUBTITLES="subs"(,?)/g,
+          (_match, before: string, after: string) =>
+            before && after ? ',' : '',
+        );
+      }
+    }
+  }
+
   private static getYesNo(v: boolean) {
     return v ? 'YES' : 'NO';
+  }
+
+  private static mediaAttributes(line: string): Map<string, string> {
+    const attributes = new Map<string, string>();
+    for (const match of line
+      .slice(this._mediaTag.length)
+      .matchAll(/(^|,)([A-Z0-9-]+)=("[^"]*"|[^,\r\n]*)/g)) {
+      const key = match[2];
+      const value = match[3];
+      if (key !== undefined && value !== undefined) {
+        attributes.set(key, value);
+      }
+    }
+    return attributes;
+  }
+
+  private static replaceMediaAttributes(
+    line: string,
+    attributes: Map<string, string | undefined>,
+  ): string {
+    const terminator = line.endsWith('\r') ? '\r' : '';
+    const content = line.slice(
+      this._mediaTag.length,
+      line.length - terminator.length,
+    );
+    const replaced = new Set<string>();
+    const updated = content.replace(
+      /(^|,)([A-Z0-9-]+)=("[^"]*"|[^,]*)/g,
+      (attribute: string, separator: string, key: string) => {
+        if (!attributes.has(key)) return attribute;
+        replaced.add(key);
+        const value = attributes.get(key);
+        return value === undefined ? '' : `${separator}${key}=${value}`;
+      },
+    );
+    const added: string[] = [];
+    for (const [key, value] of attributes) {
+      if (!replaced.has(key) && value !== undefined) {
+        added.push(`${key}=${value}`);
+      }
+    }
+    return (
+      this._mediaTag +
+      updated +
+      (added.length > 0 ? ',' + added.join(',') : '') +
+      terminator
+    );
   }
 }

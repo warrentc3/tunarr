@@ -38,6 +38,7 @@ export class FfmpegCommandGenerator {
     subtitleInputSource: Nullable<SubtitlesInputSource>,
     concatInputSource: Nullable<ConcatInputSource>,
     steps: PipelineStep[],
+    additionalSubtitleInputSources: readonly SubtitlesInputSource[] = [],
   ): string[] {
     const args = [
       ...flatMap(filter(steps, isGlobalOption), (step) => step.options()),
@@ -83,6 +84,13 @@ export class FfmpegCommandGenerator {
         '-i',
         subtitleInputSource.path,
       );
+    }
+
+    for (const subtitle of additionalSubtitleInputSources) {
+      if (!includedPaths.has(subtitle.path)) {
+        includedPaths.add(subtitle.path);
+        args.push(...subtitle.getInputOptions(), '-i', subtitle.path);
+      }
     }
 
     if (concatInputSource) {

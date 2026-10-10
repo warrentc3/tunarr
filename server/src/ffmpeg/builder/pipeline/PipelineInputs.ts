@@ -10,5 +10,6 @@ export type PipelineInputs = {
   audioInput: Nullable<AudioInputSource>;
   watermarkInput: Nullable<WatermarkInputSource>;
   subtitleInput: Nullable<SubtitlesInputSource>;
+  additionalSubtitleInputs?: readonly SubtitlesInputSource[];
   concatInput: Nullable<ConcatInputSource>;
 };

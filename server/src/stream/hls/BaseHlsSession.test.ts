@@ -27,6 +27,10 @@ class TestHlsSession extends BaseHlsSession {
     return this.minSubtitleSegmentRequested;
   }
 
+  minSubtitleRendition(rendition: string) {
+    return this.minSubtitleSegmentRequestedFor(rendition);
+  }
+
   protected getHlsOptions(): DeepRequired<HlsOptions> {
     return {
       hlsDeleteThreshold: 3,
@@ -114,6 +118,21 @@ describe('BaseHlsSession', () => {
   });
 
   describe('_minByIp stale connection cleanup', () => {
+    it('keeps each subtitle rendition floor separate and releases them on disconnect', () => {
+      session.addConnection('client', makeConnection('client'));
+      session.onSegmentRequested('client', 'sub_a12_000050.vtt', 'a12');
+      session.onSegmentRequested('client', 'sub_b34_000005.vtt', 'b34');
+      session.onSegmentRequested('client', 'data000040.ts');
+
+      expect(session.minSubtitleRendition('a12')).toBe(50);
+      expect(session.minSubtitleRendition('b34')).toBe(5);
+      expect(session.minSubtitleRendition('unknown')).toBe(0);
+      expect(session.minSubtitleSegment).toBe(0);
+      expect(session.minSegment).toBe(40);
+      session.removeConnection('client');
+      expect(session.minSubtitleRendition('a12')).toBe(0);
+      expect(session.minSubtitleRendition('b34')).toBe(0);
+    });
     it('tracks segment numbers per IP when onSegmentRequested is called', () => {
       session.onSegmentRequested('192.168.1.1', 'data000010.ts');
       session.onSegmentRequested('192.168.1.2', 'data000020.ts');

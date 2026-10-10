@@ -23,9 +23,12 @@ import {
   trim,
 } from 'lodash-es';
 import NodeCache from 'node-cache';
+import { execFile } from 'node:child_process';
 import { format } from 'node:util';
+import { z } from 'zod';
 import { attempt, isNonEmptyString, parseIntOrNull } from '../util/index.ts';
 import { FfmpegCapabilities } from './builder/capabilities/FfmpegCapabilities.ts';
+import { bitrateFromSize, positiveBitrate } from '../stream/SourceBitrate.ts';
 
 const CacheKeys = {
   ENCODERS: 'encoders',
@@ -49,6 +52,32 @@ export type FfmpegEncoder = {
   ffmpegName: string;
   name: string;
 };
+
+export type FfprobeStreamLayout = {
+  videoCount: number;
+  audioCount: number;
+  hasData: boolean;
+};
+
+const FfprobeStreamLayoutSchema = z.object({
+  streams: z
+    .array(
+      z.object({
+        codec_type: z.enum([
+          'video',
+          'audio',
+          'subtitle',
+          'data',
+          'attachment',
+        ]),
+        codec_name: z.string().optional(),
+        disposition: z
+          .object({ attached_pic: z.number().optional() })
+          .optional(),
+      }),
+    )
+    .nonempty(),
+});
 
 const VersionExtractionPattern = /version\s+([^\s]+)\s+.*Copyright/;
 const VersionNumberExtractionPattern = /n?(\d+)\.(\d+)(\.(\d+))?[_\-.]*(.*)/;
@@ -334,6 +363,153 @@ export class FfmpegInfo {
     }
 
     return result.data;
+  }
+
+  /** Only used when scan-time rate facts are unavailable. Never logs credentials. */
+  async probeSourceBitrate(
+    path: string,
+    headers?: Readonly<Record<string, string>>,
+  ) {
+    const headerEntries = Object.entries(headers ?? {});
+    if (
+      headerEntries.some(
+        ([name, value]) =>
+          !/^[!#$%&'*+.^_`|~A-Za-z0-9-]+$/.test(name) || /[\r\n]/.test(value),
+      )
+    )
+      return;
+    const args = [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=bit_rate,size,duration',
+      '-of',
+      'json',
+    ];
+    if (headerEntries.length > 0) {
+      args.push(
+        '-headers',
+        headerEntries.map(([name, value]) => `${name}: ${value}\r\n`).join(''),
+      );
+    }
+    args.push(path);
+    try {
+      const output = await new Promise<string>((resolve, reject) => {
+        execFile(
+          this.ffprobePath,
+          args,
+          {
+            timeout: 5_000,
+            maxBuffer: 1024 * 1024,
+            windowsHide: true,
+            encoding: 'utf8',
+          },
+          (error, stdout) => {
+            if (error !== null) {
+              reject(new Error('Unable to measure source bitrate'));
+              return;
+            }
+            resolve(stdout);
+          },
+        );
+      });
+      const parsed = z
+        .object({
+          format: z.object({
+            bit_rate: z.coerce.number().optional(),
+            size: z.coerce.number().optional(),
+            duration: z.coerce.number().optional(),
+          }),
+        })
+        .safeParse(JSON.parse(output));
+      if (!parsed.success) return;
+      const source = parsed.data.format;
+      return (
+        positiveBitrate(source.bit_rate) ??
+        bitrateFromSize(
+          source.size,
+          source.duration === undefined ? undefined : source.duration * 1000,
+        )
+      );
+    } catch {
+      return;
+    }
+  }
+
+  /**
+   * Probe actual mapped streams, including attached-picture dispositions.
+   * Unknown/failed layouts retain the legacy data-preserving subtitle output.
+   */
+  async probeStreamLayout(
+    path: string,
+    headers?: Readonly<Record<string, string>>,
+    timeout: number = 5_000,
+  ): Promise<FfprobeStreamLayout | undefined> {
+    if (!Number.isFinite(timeout) || timeout <= 0) return;
+    const args = [
+      '-v',
+      'error',
+      '-show_entries',
+      'stream=codec_type,codec_name:stream_disposition=attached_pic',
+    ];
+    const headerEntries = Object.entries(headers ?? {});
+    if (headerEntries.length > 0) {
+      if (
+        headerEntries.some(
+          ([name, value]) =>
+            !/^[!#$%&'*+.^_`|~A-Za-z0-9-]+$/.test(name) || /[\r\n]/.test(value),
+        )
+      )
+        return;
+      args.push(
+        '-headers',
+        headerEntries.map(([name, value]) => `${name}: ${value}\r\n`).join(''),
+      );
+    }
+    args.push('-of', 'json', path);
+    try {
+      // The ordinary helper logs argv; source URLs and headers can contain
+      // credentials. Neither argv nor child-process errors are logged here.
+      const output = await new Promise<string>((resolve, reject) => {
+        execFile(
+          this.ffprobePath,
+          args,
+          {
+            timeout: Math.min(timeout, 5_000),
+            maxBuffer: 1024 * 1024,
+            windowsHide: true,
+            encoding: 'utf8',
+          },
+          (error, stdout) => {
+            if (error !== null) {
+              reject(new Error('Unable to probe input stream layout'));
+              return;
+            }
+            resolve(stdout);
+          },
+        );
+      });
+      const parsed = FfprobeStreamLayoutSchema.safeParse(JSON.parse(output));
+      if (!parsed.success) return;
+      return {
+        // Match -map 0:V. Codec/extension is not a cover classification;
+        // unflagged MJPEG and intentionally generated still video remain valid.
+        videoCount: parsed.data.streams.filter(
+          (stream) =>
+            stream.codec_type === 'video' &&
+            stream.disposition?.attached_pic !== 1,
+        ).length,
+        audioCount: parsed.data.streams.filter(
+          (stream) => stream.codec_type === 'audio',
+        ).length,
+        hasData: parsed.data.streams.some(
+          (stream) =>
+            stream.codec_type === 'data' || stream.codec_name === 'bin_data',
+        ),
+      };
+    } catch {
+      return;
+    }
   }
 
   private getFfmpegStdout(
