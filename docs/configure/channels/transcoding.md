@@ -58,6 +58,8 @@ Regular uses a plain dialogue track, excluding forced and SDH tracks. If only SD
 
 The Forced option for the first language in priority order is the group's default and autoselect option. Other options are available for manual selection; SDH carries its accessibility characteristics. An empty option still advances alongside A/V with valid, cue-free WebVTT segments. FFmpeg writes the live playlists; Tunarr only enriches the master and repairs FFmpeg 7.1.1's programme-boundary discontinuities, end markers and inherited subtitle URIs.
 
+Each configured language adds three HLS muxers to the programme's FFmpeg process. Each of them receives the full audio and video stream, so that its subtitle segments stay on the video clock, and discards that copy; keep the language list short. A subtitle option that fails to write stops advancing until the next programme and does not interrupt audio and video.
+
 Image subtitles are excluded because they require burn-in. Text formats that the bundled FFmpeg cannot decode, such as TTML and Blu-ray text subtitles, are excluded as well, because a track FFmpeg cannot convert would stop the programme's single output process. Attached cover pictures are excluded from video selection and copying; intentional image inputs such as offline screens remain available.
 
 #### Things to consider

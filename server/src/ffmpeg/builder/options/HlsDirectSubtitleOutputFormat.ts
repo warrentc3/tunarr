@@ -74,7 +74,6 @@ export class HlsDirectSubtitleOutputFormat extends OutputOption {
     if (!this.isFirstTranscode) flags.push('discont_start');
 
     const common: Record<string, string> = {
-      onfail: 'abort',
       f: 'hls',
       // Packets reach each child already interleaved by the parent output
       // (see ParentInterleaveDeltaMicros). A sparse subtitle must not make a
@@ -94,6 +93,8 @@ export class HlsDirectSubtitleOutputFormat extends OutputOption {
       this.child(
         {
           ...common,
+          // The A/V child is the programme; its failure must end the process.
+          onfail: 'abort',
           select: avIndexes.join(','),
           hls_segment_filename: this.segmentTemplate,
           master_pl_name: 'playlist.m3u8',
@@ -107,6 +108,11 @@ export class HlsDirectSubtitleOutputFormat extends OutputOption {
         this.child(
           {
             ...common,
+            // A subtitle child that fails (unwritable null device, a cue the
+            // muxer rejects) must not take the A/V output down with it. The
+            // rendition then stops advancing, which players treat as a
+            // non-fatal track error, and the next producer recreates it.
+            onfail: 'ignore',
             select: [
               ...avIndexes,
               avIndexes.length + rendition.subtitleOutputIndex,

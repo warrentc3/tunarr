@@ -32,6 +32,7 @@ describe('HlsDirectSubtitleOutputFormat', () => {
     const children = args[5].split('|');
     expect(children).toHaveLength(3);
     expect(children[0]).toContain("select='0,1'");
+    expect(children[0]).toContain("onfail='abort'");
     expect(children[0]).toContain("master_pl_name='playlist.m3u8'");
     expect(children[0]).not.toContain('var_stream_map');
     expect(children[0]).toContain('append_list');
@@ -54,6 +55,7 @@ describe('HlsDirectSubtitleOutputFormat', () => {
       expect(child).not.toContain('start_number');
     }
     for (const child of children.slice(1)) {
+      expect(child).toContain("onfail='ignore'");
       expect(child).toContain('append_list');
       expect(child).toContain("hls_segment_filename='/dev/null'");
       expect(child).toContain("strftime='1'");
