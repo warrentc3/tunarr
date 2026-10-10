@@ -80,6 +80,11 @@ describe('LocalSubtitlesService', () => {
     ['en.default.srt', 'eng', false, false, 'subrip'],
     ['default.eng.forced.ass', 'eng', true, false, 'ass'],
     ['default.ssa', '', false, false, 'ass'],
+    ['hi.en.srt', 'eng', false, true, 'subrip'],
+    ['en-US.srt', 'eng', false, false, 'subrip'],
+    ['en-US.sdh.srt', 'eng', false, true, 'subrip'],
+    ['zh-Hant.srt', 'zho', false, false, 'subrip'],
+    ['fin.srt', 'fin', false, false, 'subrip'],
   ])('parses %s', (suffix, language, forced, sdh, codec) => {
     const subtitlePath = `/a/b/c/The Danish Girl.${suffix}`;
     expect(
@@ -106,17 +111,34 @@ describe('LocalSubtitlesService', () => {
     ).toMatchObject({ language: '', forced: false, sdh: false });
   });
 
-  test.each(['Episode2.eng.srt', 'Another Episode.eng.srt', 'Episode.eng.nfo'])(
-    'does not associate %s as a subtitle',
-    (filename) => {
-      expect(
-        LocalSubtitlesService.parseSubtitleFilePath(
-          '/a/b/c/Episode.mkv',
-          `/a/b/c/${filename}`,
-        ),
-      ).toBeNull();
-    },
-  );
+  test.each([
+    'Episode2.eng.srt',
+    'Another Episode.eng.srt',
+    'Episode.eng.nfo',
+    // Sibling titles whose names extend this video's basename.
+    'Episode 2.eng.srt',
+    'Episode-2.eng.srt',
+    'Episode.2.eng.srt',
+    'Episode Part 2.eng.srt',
+    "Episode.Director's.Cut.eng.srt",
+    'Episode.eng.fre.srt',
+  ])('does not associate %s as a subtitle', (filename) => {
+    expect(
+      LocalSubtitlesService.parseSubtitleFilePath(
+        '/a/b/c/Episode.mkv',
+        `/a/b/c/${filename}`,
+      ),
+    ).toBeNull();
+  });
+
+  test('does not associate an edition-suffixed sibling as a subtitle', () => {
+    expect(
+      LocalSubtitlesService.parseSubtitleFilePath(
+        '/a/b/c/Movie (2010).mkv',
+        "/a/b/c/Movie (2010) {edition-Director's Cut}.en.srt",
+      ),
+    ).toBeNull();
+  });
 
   describe('directory discovery', () => {
     let directory: string;
@@ -178,6 +200,7 @@ describe('LocalSubtitlesService', () => {
           video,
           ...expected.map((subtitle) => subtitle.path),
           path.join(directory, 'Mrs. Sureice2.eng.srt'),
+          path.join(directory, 'Mrs. Sureice 2.eng.srt'),
           path.join(directory, 'Unrelated.eng.srt'),
           path.join(directory, 'Mrs. Sureice.eng.nfo'),
         ].map((file) => fs.writeFile(file, '')),

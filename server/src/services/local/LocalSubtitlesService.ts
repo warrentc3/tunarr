@@ -76,26 +76,56 @@ export class LocalSubtitlesService {
     if (suffix.length > 0 && !/^[.\s_-]/.test(suffix)) {
       return null;
     }
-    const tokens = suffix
+    // The suffix is a strict grammar: dot- or space-separated tokens, each a
+    // flag, a language, or a language joined by '-' or '_' to a region or
+    // script qualifier or to a flag (pt-BR, zh-Hant, eng_sdh). Any other
+    // token means the file belongs to a sibling title whose name extends this
+    // video's, such as "Episode 2.eng.srt" beside "Episode.mkv", and is not
+    // this video's subtitle at all.
+    const flagTokens = new Set(['forced', 'sdh', 'cc', 'hi', 'default']);
+    const privateUse = /^q[a-t][a-z]$/;
+    const flags = new Set<string>();
+    const languageTokens: string[] = [];
+    for (const token of suffix
       .toLowerCase()
-      .split(/[.\s_-]+/)
-      .filter((s) => s.length > 0);
-    const languageTokens = tokens.filter(
-      (token) => !['forced', 'sdh', 'cc', 'default'].includes(token),
-    );
-    // HI is Hindi when it is the language token; alongside another language
-    // it is the established hearing-impaired filename marker.
-    const lang =
-      languageTokens.find((token) =>
-        isNonEmptyString(LanguageService.normalizeToAlpha3T(token)),
-      ) ??
-      languageTokens[0] ??
-      '';
-    const sdh =
-      tokens.includes('sdh') ||
-      tokens.includes('cc') ||
-      (tokens.includes('hi') && lang !== 'hi');
-    const forced = tokens.includes('forced');
+      .split(/[.\s]+/)
+      .filter((s) => s.length > 0)) {
+      if (flagTokens.has(token)) {
+        flags.add(token);
+        continue;
+      }
+      const [head, ...qualifiers] = token
+        .split(/[-_]+/)
+        .filter((s) => s.length > 0);
+      if (
+        head === undefined ||
+        (!isNonEmptyString(LanguageService.normalizeToAlpha3T(head)) &&
+          !privateUse.test(head))
+      ) {
+        return null;
+      }
+      for (const qualifier of qualifiers) {
+        if (flagTokens.has(qualifier)) {
+          flags.add(qualifier);
+        } else if (!/^[a-z]{2,4}$/.test(qualifier)) {
+          return null;
+        }
+      }
+      languageTokens.push(head);
+    }
+    if (languageTokens.length > 1) {
+      return null;
+    }
+    // HI is Hindi when it is the only language token; alongside another
+    // language it is the established hearing-impaired filename marker.
+    let lang = languageTokens[0] ?? '';
+    let hearingImpaired = flags.has('hi');
+    if (lang === '' && hearingImpaired) {
+      lang = 'hi';
+      hearingImpaired = false;
+    }
+    const sdh = flags.has('sdh') || flags.has('cc') || hearingImpaired;
+    const forced = flags.has('forced');
     const maybeLang3T = LanguageService.normalizeToAlpha3T(lang);
 
     if (isNonEmptyString(maybeLang3T)) {
