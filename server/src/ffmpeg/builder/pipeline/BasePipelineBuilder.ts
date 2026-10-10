@@ -456,12 +456,18 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
         ? (this.ffmpegState.start?.asSeconds() ?? 0) *
           this.desiredState.videoTrackTimescale
         : 0;
-      this.pipelineSteps.push(
-        OutputTsOffsetOption(
-          (this.ffmpegState.ptsOffset ?? 0) - inputSeek,
-          this.desiredState.videoTrackTimescale,
-        ),
-      );
+      // Stream copy starts at the keyframe at or before the seek, so an offset
+      // below zero would push those first packets below zero, and hlsenc's
+      // inner mpegts muxer then shifts the TS timeline forward silently while
+      // the WebVTT children keep theirs (measured on 7.1.1). A channel clock
+      // shorter than the seek keeps the source timeline instead; the
+      // discontinuity tag covers the jump either way.
+      const offset = Math.max((this.ffmpegState.ptsOffset ?? 0) - inputSeek, 0);
+      if (offset > 0) {
+        this.pipelineSteps.push(
+          OutputTsOffsetOption(offset, this.desiredState.videoTrackTimescale),
+        );
+      }
     }
 
     if (

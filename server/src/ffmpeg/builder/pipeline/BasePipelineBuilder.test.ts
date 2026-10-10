@@ -612,6 +612,38 @@ describe('BasePipelineBuilder', () => {
     },
   );
 
+  test('keeps the source timeline when the channel clock is shorter than the input seek', () => {
+    const copyState = FfmpegState.create({
+      version: state.version,
+      start: dayjs.duration(90, 'seconds'),
+      ptsOffset: 5 * 90000,
+      hlsDirectStreamCopy: { audioInputIndex: 19 },
+      outputFormat: HlsDirectOutputFormat(defaultHlsOptions),
+    });
+    const args = new NoopPipelineBuilder(
+      makeVideo(),
+      null,
+      null,
+      null,
+      null,
+      EmptyFfmpegCapabilities,
+    )
+      .build(
+        copyState,
+        new FrameState({
+          ...frameState,
+          videoFormat: 'copy',
+          videoTrackTimescale: 90000,
+        }),
+        DefaultPipelineOptions,
+      )
+      .getCommandArgs();
+    // A negative offset would push the first copied packets below zero and
+    // hlsenc's inner mpegts muxer would shift the TS timeline on its own.
+    expect(args).not.toContain('-output_ts_offset');
+    expect(args).toContain('-copyts');
+  });
+
   test('Direct v2 retains selected AV mapping when using separate subtitle output', () => {
     const copyState = FfmpegState.create({
       version: state.version,
