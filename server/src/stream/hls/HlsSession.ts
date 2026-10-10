@@ -44,6 +44,10 @@ import { HlsNativePlaylistBridge } from './HlsNativePlaylistBridge.ts';
 import { createDirectSubtitleSlots } from '../../ffmpeg/DirectSubtitleSlots.ts';
 import type { FeatureFlagService } from '../../services/FeatureFlagService.ts';
 
+// A fresh Direct v2 session has only seen a short served window, which is too
+// tight a bound for deciding that a client has stopped reading a rendition.
+const MinRenditionInactiveMs = 60_000;
+
 export type HlsSessionProvider = (
   channel: ChannelOrmWithTranscodeConfig,
   options: HlsSessionOptions,
@@ -347,6 +351,16 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       requestedVideo > 0
         ? Math.min(videoSequence, requestedVideo)
         : videoSequence;
+    // RFC 8216 6.2.2 retains a removed segment for its duration plus the
+    // longest distributed playlist containing it. Session-wide maxima are
+    // conservative; file mtime cannot tell when a URI left a served window.
+    const retentionMs =
+      this.#nativeMaxPlaylistDurationMs + this.#nativeMaxSegmentDurationMs;
+    // A client reading a rendition requests from it at least once per served
+    // window, so one that kept requesting for longer without touching it has
+    // switched away. Its old floor would otherwise hold every later segment
+    // of that rendition for the life of the connection.
+    const renditionInactiveMs = Math.max(retentionMs, MinRenditionInactiveMs);
     const floors = new Map<string, number>();
     for (const slot of this.#directSubtitleSlots) {
       const lines = await this.readSubtitlePlaylist(slot.playlistName);
@@ -354,7 +368,10 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       const repaired = this.nativePlaylistResult(
         this.#nativePlaylistBridge.repairSubtitles(slot.playlistName, lines),
       );
-      const requested = this.minSubtitleSegmentRequestedFor(slot.id);
+      const requested = this.minSubtitleSegmentRequestedFor(
+        slot.id,
+        renditionInactiveMs,
+      );
       floors.set(
         slot.segmentPrefix,
         requested > 0
@@ -364,11 +381,6 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
     }
     const files = await fs.readdir(this._workingDirectory);
     const now = Date.now();
-    // RFC 8216 6.2.2 retains a removed segment for its duration plus the
-    // longest distributed playlist containing it. Session-wide maxima are
-    // conservative; file mtime cannot tell when a URI left a served window.
-    const retentionMs =
-      this.#nativeMaxPlaylistDurationMs + this.#nativeMaxSegmentDurationMs;
     for (const filename of files) {
       const video = /^data(\d+)\.(ts|mp4)$/.exec(filename);
       let expired = video !== null && Number(video[1]) < videoFloor;

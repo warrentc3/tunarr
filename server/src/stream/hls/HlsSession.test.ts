@@ -782,6 +782,31 @@ describe('HlsSession', () => {
       expect(files).not.toContain(subtitleName(3));
     });
 
+    test('releases a rendition floor once the client kept playing without it', async () => {
+      await writePlaylist('stream.m3u8', 10, 2, videoName);
+      await writePlaylist(slot.playlistName, 10, 2, subtitleName);
+      for (const name of [videoName(5), subtitleName(5), subtitleName(11)]) {
+        await fs.writeFile(
+          path.join(session.workingDirectory, name),
+          'segment',
+        );
+      }
+      session.onSegmentRequested('10.0.0.9', videoName(5));
+      session.onSegmentRequested('10.0.0.9', subtitleName(5));
+      await prune(10, 0);
+
+      // The client switched tracks: it keeps fetching video and never asks
+      // for this rendition again, so its old floor must not pin the
+      // rendition's segments for the life of the connection.
+      vi.setSystemTime(retiredAt + 61_000);
+      session.onSegmentRequested('10.0.0.9', videoName(11));
+      await prune(10, 61);
+      await prune(10, 700);
+      const files = await fs.readdir(session.workingDirectory);
+      expect(files).not.toContain(subtitleName(5));
+      expect(files).toContain(subtitleName(11));
+    });
+
     test('restarts retirement when a previously retired URI is served again', async () => {
       await writePlaylist('stream.m3u8', 0, 20, videoName);
       const filename = path.join(session.workingDirectory, videoName(0));

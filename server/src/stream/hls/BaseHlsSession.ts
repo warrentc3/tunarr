@@ -24,11 +24,18 @@ const ExitWaitTimeoutMs = 30_000;
 // Tracks the most recently requested segment number per client IP, split by
 // numbering space: video (.ts/.mp4) and subtitle (.vtt) segments are produced
 // at very different cadences and must not be conflated into a single floor.
+// Direct v2 subtitle renditions each have their own numbering space, and a
+// client that switches renditions keeps requesting video but never the old
+// rendition again, so each rendition entry records when it was last requested
+// and the record keeps the client's latest request of any kind.
 type SegmentRequestRecord = {
   video?: number;
   subtitle?: number;
-  subtitleRenditions?: Record<string, number>;
+  subtitleRenditions?: Record<string, SubtitleRenditionRequest>;
+  requestedAt: number;
 };
+
+type SubtitleRenditionRequest = { number: number; requestedAt: number };
 
 export abstract class BaseHlsSession<
   HlsSessionOptsT extends BaseHlsSessionOptions = BaseHlsSessionOptions,
@@ -70,12 +77,29 @@ export abstract class BaseHlsSession<
     return this.minRequestedFor('subtitle');
   }
 
-  protected minSubtitleSegmentRequestedFor(rendition: string): number {
+  /**
+   * The lowest segment number a client last requested from a Direct v2
+   * subtitle rendition, or 0 when nobody is reading it. A client that
+   * switched renditions keeps requesting video but not the old rendition, so
+   * an entry that its client left untouched for more than `inactiveAfterMs`
+   * of later requests is ignored. A paused client makes no requests at all
+   * and keeps its floor, exactly as it keeps its video floor.
+   */
+  protected minSubtitleSegmentRequestedFor(
+    rendition: string,
+    inactiveAfterMs = Number.POSITIVE_INFINITY,
+  ): number {
     let min: number | undefined;
     for (const record of this._minByIp.values()) {
-      const value = record.subtitleRenditions?.[rendition];
-      if (value !== undefined && (min === undefined || value < min)) {
-        min = value;
+      const request = record.subtitleRenditions?.[rendition];
+      if (request === undefined) {
+        continue;
+      }
+      if (record.requestedAt - request.requestedAt > inactiveAfterMs) {
+        continue;
+      }
+      if (min === undefined || request.number < min) {
+        min = request.number;
       }
     }
     return min ?? 0;
@@ -134,18 +158,24 @@ export abstract class BaseHlsSession<
       const parsed = parseInt(matches[1]!);
       if (!isNaN(parsed)) {
         const kind = matches[2] === 'vtt' ? 'subtitle' : 'video';
-        const existing = this._minByIp.get(clientIp) ?? {};
+        const requestedAt = Date.now();
+        const existing = this._minByIp.get(clientIp);
         if (kind === 'subtitle' && subtitleRendition !== undefined) {
           this._minByIp.set(clientIp, {
             ...existing,
+            requestedAt,
             subtitleRenditions: {
-              ...existing.subtitleRenditions,
-              [subtitleRendition]: parsed,
+              ...existing?.subtitleRenditions,
+              [subtitleRendition]: { number: parsed, requestedAt },
             },
           });
           return;
         }
-        this._minByIp.set(clientIp, { ...existing, [kind]: parsed });
+        this._minByIp.set(clientIp, {
+          ...existing,
+          requestedAt,
+          [kind]: parsed,
+        });
       }
     }
   }
