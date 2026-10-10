@@ -22,8 +22,14 @@ describe('HlsDirectSubtitleOutputFormat', () => {
       false,
       'linux',
     ).options();
-    expect(args.slice(0, 3)).toEqual(['-copyts', '-f', 'tee']);
-    const children = args[3].split('|');
+    expect(args.slice(0, 5)).toEqual([
+      '-copyts',
+      '-max_interleave_delta',
+      '1000000',
+      '-f',
+      'tee',
+    ]);
+    const children = args[5].split('|');
     expect(children).toHaveLength(3);
     expect(children[0]).toContain("select='0,1'");
     expect(children[0]).toContain("master_pl_name='playlist.m3u8'");
@@ -72,11 +78,11 @@ describe('HlsDirectSubtitleOutputFormat', () => {
       true,
       'linux',
     ).options();
-    expect(args[3]).toContain("select='0'");
-    expect(args[3]).toContain("select='0,1'");
-    expect(args[3]).not.toContain('a\\:0');
-    expect(args[3]).not.toContain('program_date_time');
-    expect(args[3]).not.toMatch(
+    expect(args[5]).toContain("select='0'");
+    expect(args[5]).toContain("select='0,1'");
+    expect(args[5]).not.toContain('a\\:0');
+    expect(args[5]).not.toContain('program_date_time');
+    expect(args[5]).not.toMatch(
       /omit_endlist|discont_start|initial_discontinuity/u,
     );
   });
@@ -92,8 +98,8 @@ describe('HlsDirectSubtitleOutputFormat', () => {
       false,
       'win32',
     ).options();
-    expect(args[3]).toContain(String.raw`hls_segment_filename='\\\\.\\nul'`);
-    expect(args[3]).toContain(
+    expect(args[5]).toContain(String.raw`hls_segment_filename='\\\\.\\nul'`);
+    expect(args[5]).toContain(
       String.raw`hls_subtitle_path='C\:\\channel files\\subtitle_eng.m3u8'`,
     );
   });

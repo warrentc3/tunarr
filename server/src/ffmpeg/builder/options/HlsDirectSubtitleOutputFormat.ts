@@ -19,6 +19,18 @@ export type HlsDirectSubtitleRendition = {
  * packets as its segment clock, discarding the duplicate transport stream.
  */
 export class HlsDirectSubtitleOutputFormat extends OutputOption {
+  /**
+   * Interleaving happens in the parent tee context, not in the children, so
+   * the children's own bound does not apply there. An empty subtitle slot is a
+   * mapped stream that never produces a packet, and libavformat's default
+   * bound of ten seconds then holds every A/V packet for ten seconds of media
+   * before writing: measured as ~9.4 s of extra publication latency on every
+   * realtime producer, and a ~20 s publication hole at each programme
+   * handover. One second covers the A/V interleave skew of normally muxed
+   * media; a source interleaved wider than this logs non-monotonic DTS.
+   */
+  public static ParentInterleaveDeltaMicros = 1_000_000;
+
   constructor(
     private playlistPath: string,
     private segmentTemplate: string,
@@ -64,9 +76,9 @@ export class HlsDirectSubtitleOutputFormat extends OutputOption {
     const common: Record<string, string> = {
       onfail: 'abort',
       f: 'hls',
-      // tee already interleaves these packets. A sparse subtitle must not
-      // make a child queue another ten seconds of AV before publishing.
-      // Zero removes this buffering limit; one microsecond bounds the hold.
+      // Packets reach each child already interleaved by the parent output
+      // (see ParentInterleaveDeltaMicros). A sparse subtitle must not make a
+      // child queue more AV before publishing; one microsecond bounds the hold.
       max_interleave_delta: '1',
       hls_time: `${HlsDirectOutputFormat.SegmentSeconds}`,
       hls_list_size: `${HlsDirectOutputFormat.PlaylistSize}`,
@@ -130,7 +142,14 @@ export class HlsDirectSubtitleOutputFormat extends OutputOption {
 
     // Leave every HLS child's timestamp policy at its shared default. A
     // subtitle-only avoid_negative_ts override would change its A/V relation.
-    return ['-copyts', '-f', 'tee', children.join('|')];
+    return [
+      '-copyts',
+      '-max_interleave_delta',
+      `${HlsDirectSubtitleOutputFormat.ParentInterleaveDeltaMicros}`,
+      '-f',
+      'tee',
+      children.join('|'),
+    ];
   }
 
   private child(options: Record<string, string>, filename: string): string {
