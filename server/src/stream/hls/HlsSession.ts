@@ -589,11 +589,12 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
   }
 
   protected override getAdditionalRequiredFiles(): string[] {
-    if (this.#currentDirectSubtitleRenditions !== undefined) {
-      return this.#currentDirectSubtitleRenditions.map(
-        (rendition) => rendition.playlistName,
-      );
-    }
+    // Direct v2 slot playlists are best-effort outputs: their tee children
+    // run with onfail=ignore, so one that never appears must not fail the
+    // A/V session at startup. They are written at the same segment
+    // boundaries as stream.m3u8, so readiness on the video playlist and its
+    // initial segments already covers the healthy case.
+    if (this.sessionType === 'hls_direct_v2') return [];
     return this.#currentSubtitleRendition
       ? [this.getHlsOptions().subtitleStreamNameFormat]
       : [];

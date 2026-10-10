@@ -405,9 +405,9 @@ describe('HlsSession', () => {
         if (run === 0) originalMaster = master;
         expect(master).toBe(originalMaster);
         expect(master?.match(/TYPE=SUBTITLES/g)).toHaveLength(3);
-        expect(session.requiredFiles()).toEqual(
-          slots.map((slot) => slot.playlistName),
-        );
+        // Slot playlists are best-effort outputs (their tee children run
+        // with onfail=ignore), so startup readiness must not wait for them.
+        expect(session.requiredFiles()).toEqual([]);
         expect(
           session.isSubtitlePlaylist('subtitle_eng_regular_av_.m3u8'),
         ).toBe(false);
