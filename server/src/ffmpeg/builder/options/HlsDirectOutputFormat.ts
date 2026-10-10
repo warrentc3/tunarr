@@ -1,7 +1,4 @@
 import { OutputOption } from './OutputOption.ts';
-import path from 'node:path';
-import { HlsVariantStreamMap } from './HlsVariantStreamMap.ts';
-import type { HlsSubtitleVariant } from './HlsVariantStreamMap.ts';
 
 /**
  * HLS output format for direct stream copy mode (no transcoding).
@@ -19,7 +16,6 @@ export class HlsDirectOutputFormat extends OutputOption {
     private baseStreamUrl: string,
     private isFirstTranscode: boolean,
     private emitEndList: boolean = false,
-    private nativeSubtitleVariant?: HlsSubtitleVariant,
   ) {
     super();
   }
@@ -44,15 +40,6 @@ export class HlsDirectOutputFormat extends OutputOption {
       '-master_pl_name',
       'playlist.m3u8',
     ];
-
-    if (this.nativeSubtitleVariant !== undefined) {
-      opts.push(
-        '-hls_subtitle_path',
-        path.join(path.dirname(this.playlistPath), 'subs.m3u8'),
-        '-var_stream_map',
-        new HlsVariantStreamMap(this.nativeSubtitleVariant).toString(),
-      );
-    }
 
     // Each programme is produced ahead of airtime by a new FFmpeg process.
     // Its wall-clock PROGRAM-DATE-TIME would overlap the preceding programme.

@@ -531,7 +531,6 @@ describe('HlsSession', () => {
           language: 'eng',
           default: false,
           forced: false,
-          nativeHls: true,
         },
       },
     } as unknown as ProgramStream;
@@ -1039,40 +1038,16 @@ describe('HlsSession', () => {
       session: HlsSession,
       sequenceNum: number,
       extensions: string[],
-      subtitlePrefix?: string,
     ) {
       return (
         session as unknown as {
           deleteOldSegmentFiles(
             sequenceNum: number,
             extensions: string[],
-            subtitlePrefix?: string,
           ): Promise<void>;
         }
-      ).deleteOldSegmentFiles(sequenceNum, extensions, subtitlePrefix);
+      ).deleteOldSegmentFiles(sequenceNum, extensions);
     }
-
-    test('prunes only the requested native rendition prefix', async () => {
-      const session = makeSession(dir.name);
-      await fs.mkdir(session.workingDirectory, { recursive: true });
-      const files = [
-        'subtitle_a12_av_0.vtt',
-        'subtitle_a12_av_1.vtt',
-        'subtitle_b34_av_0.vtt',
-        'data000000.ts',
-      ];
-      await Promise.all(
-        files.map((file) =>
-          fs.writeFile(path.join(session.workingDirectory, file), ''),
-        ),
-      );
-      await callDeleteOldSegmentFiles(session, 1, ['.vtt'], 'subtitle_a12_av_');
-      expect((await fs.readdir(session.workingDirectory)).sort()).toEqual([
-        'data000000.ts',
-        'subtitle_a12_av_1.vtt',
-        'subtitle_b34_av_0.vtt',
-      ]);
-    });
 
     test('deletes .ts/.mp4 segments below the sequence number (regression)', async () => {
       const session = makeSession(dir.name);

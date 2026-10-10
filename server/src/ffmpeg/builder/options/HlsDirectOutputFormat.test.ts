@@ -25,35 +25,6 @@ describe('HlsDirectOutputFormat', () => {
     },
   );
 
-  test('keeps the no-subtitle output free of native subtitle mapping', () => {
-    expect(makeFormat(true).options()).not.toContain('-var_stream_map');
-  });
-
-  test('emits FFmpeg 7 native subtitle mapping with the existing subtitle playlist URL', () => {
-    const opts = new HlsDirectOutputFormat(
-      '/some/path/stream.m3u8',
-      '/some/path/data%06d.ts',
-      '/stream/channels/test/hls_direct_v2/',
-      true,
-      false,
-      {
-        videoOutputIndexes: [0],
-        audioOutputIndexes: [0, 1],
-        subtitleOutputIndex: 0,
-        group: 'subs',
-        language: 'eng',
-        default: false,
-      },
-    ).options();
-    expect(opts[opts.indexOf('-hls_subtitle_path') + 1]).toBe(
-      '/some/path/subs.m3u8',
-    );
-    expect(opts[opts.indexOf('-var_stream_map') + 1]).toBe(
-      'v:0,a:0,a:1,s:0,sgroup:subs,default:no,language:eng',
-    );
-    expect(opts.join(' ')).not.toContain('sname:');
-    expect(opts.at(-1)).toBe('/some/path/stream.m3u8');
-  });
   test('includes -master_pl_name playlist.m3u8 for first transcode', () => {
     const opts = makeFormat(true).options();
     const idx = opts.indexOf('-master_pl_name');

@@ -8,7 +8,6 @@ import { merge } from 'lodash-es';
 import path from 'node:path';
 import type { MarkRequired } from 'ts-essentials';
 import type { OutputFormat, OutputLocation } from '../constants.ts';
-import type { HlsSubtitleVariant } from '../options/HlsVariantStreamMap.ts';
 import type { HlsDirectSubtitleRendition } from '../options/HlsDirectSubtitleOutputFormat.ts';
 import {
   MpegTsOutputFormat,
@@ -135,8 +134,6 @@ export class FfmpegState {
    */
   audioCodecOverrides: AudioCodecOverride[] = [];
 
-  /** Direct v2's selected subtitle mapped into FFmpeg's native HLS output. */
-  hlsDirectSubtitle?: HlsSubtitleVariant;
   /** Direct text slots referencing the uniquely mapped subtitle output ordinals. */
   hlsDirectSubtitles?: HlsDirectSubtitleRendition[];
   /** Complete source estimate in bits/s, used only as a copy-mode HLS hint. */

@@ -89,7 +89,6 @@ export function createDirectSubtitleSlots(
         autoSelect: isDefault,
         forced: kind === 'forced',
         sdh: kind === 'sdh',
-        nativeHls: true,
       };
     });
   });

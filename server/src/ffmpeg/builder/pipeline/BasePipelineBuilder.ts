@@ -1114,22 +1114,6 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
             );
             break;
           }
-          const nativeSubtitle =
-            this.ffmpegState.hlsDirectSubtitle !== undefined;
-          if (
-            this.subtitleInputSource?.method === SubtitleMethods.Convert &&
-            nativeSubtitle
-          ) {
-            // Input stream references and per-type output ordinals are distinct.
-            this.pipelineSteps.push(
-              makeConstantOutputOption([
-                '-map',
-                this.computeSubtitleMapRef(),
-                '-c:s',
-                'webvtt',
-              ]),
-            );
-          }
           this.pipelineSteps.push(
             new HlsDirectOutputFormat(
               this.ffmpegState.hlsPlaylistPath,
@@ -1137,13 +1121,9 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
               this.ffmpegState.hlsBaseStreamUrl,
               isFirst,
               this.ffmpegState.emitEndList,
-              this.ffmpegState.hlsDirectSubtitle,
             ),
           );
-          if (
-            this.subtitleInputSource?.method === SubtitleMethods.Convert &&
-            !nativeSubtitle
-          ) {
+          if (this.subtitleInputSource?.method === SubtitleMethods.Convert) {
             this.pipelineSteps.push(
               new HlsSubtitleOutputFormat(
                 path.join(

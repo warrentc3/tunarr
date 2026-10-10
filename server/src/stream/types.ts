@@ -170,7 +170,6 @@ export type SubtitleRenditionInfo = {
   forced: boolean;
   title?: string;
   sdh?: boolean;
-  nativeHls?: boolean;
 };
 
 /** A text subtitle choice published as its own Direct v2 WebVTT rendition. */

@@ -47,7 +47,6 @@ export class HlsMasterPlaylistMutator {
 
       const hasSubtitlesAndIsMissingReference =
         rendition &&
-        !rendition.nativeHls &&
         line.startsWith(this._variantPlaylistTag) &&
         !line.includes('SUBTITLES=');
       return hasSubtitlesAndIsMissingReference
@@ -124,63 +123,6 @@ export class HlsMasterPlaylistMutator {
         lines[index] = line + ',SUBTITLES="subs"';
       }
     }
-  }
-
-  static augmentNativeSubtitleMediaTag(
-    lines: string[],
-    rendition: SubtitleRenditionInfo,
-  ): boolean {
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index];
-      if (line === undefined || !line.startsWith(this._mediaTag)) continue;
-
-      const existing = this.mediaAttributes(line);
-      if (
-        existing.get('TYPE') !== 'SUBTITLES' ||
-        existing.get('GROUP-ID') !== '"subs"'
-      ) {
-        continue;
-      }
-
-      // Direct v2 keeps FFmpeg's subtitle URI/group. Only augment metadata on
-      // that native entry; a missing entry must not become a separate output.
-      const attributes = new Map<string, string | undefined>([
-        [
-          'NAME',
-          `"${rendition.title ?? rendition.languageName ?? rendition.language}"`,
-        ],
-        ['LANGUAGE', `"${rendition.language}"`],
-        ['DEFAULT', this.getYesNo(rendition.default)],
-        [
-          'AUTOSELECT',
-          this.getYesNo(rendition.default || rendition.sdh === true),
-        ],
-        ['FORCED', this.getYesNo(rendition.forced)],
-      ]);
-      const characteristics = (existing.get('CHARACTERISTICS') ?? '')
-        .replace(/^"|"$/g, '')
-        .split(',')
-        .filter(
-          (value) =>
-            value.length > 0 && !this._sdhCharacteristics.includes(value),
-        );
-      if (rendition.sdh === true) {
-        characteristics.push(...this._sdhCharacteristics);
-      }
-      if (characteristics.length > 0 || existing.has('CHARACTERISTICS')) {
-        attributes.set(
-          'CHARACTERISTICS',
-          characteristics.length > 0
-            ? `"${[...new Set(characteristics)].join(',')}"`
-            : undefined,
-        );
-      }
-
-      lines[index] = this.replaceMediaAttributes(line, attributes);
-      return true;
-    }
-
-    return false;
   }
 
   static injectAudioMediaTags(
@@ -266,38 +208,5 @@ export class HlsMasterPlaylistMutator {
       }
     }
     return attributes;
-  }
-
-  private static replaceMediaAttributes(
-    line: string,
-    attributes: Map<string, string | undefined>,
-  ): string {
-    const terminator = line.endsWith('\r') ? '\r' : '';
-    const content = line.slice(
-      this._mediaTag.length,
-      line.length - terminator.length,
-    );
-    const replaced = new Set<string>();
-    const updated = content.replace(
-      /(^|,)([A-Z0-9-]+)=("[^"]*"|[^,]*)/g,
-      (attribute: string, separator: string, key: string) => {
-        if (!attributes.has(key)) return attribute;
-        replaced.add(key);
-        const value = attributes.get(key);
-        return value === undefined ? '' : `${separator}${key}=${value}`;
-      },
-    );
-    const added: string[] = [];
-    for (const [key, value] of attributes) {
-      if (!replaced.has(key) && value !== undefined) {
-        added.push(`${key}=${value}`);
-      }
-    }
-    return (
-      this._mediaTag +
-      updated +
-      (added.length > 0 ? ',' + added.join(',') : '') +
-      terminator
-    );
   }
 }

@@ -513,14 +513,6 @@ describe('BasePipelineBuilder', () => {
       version: state.version,
       start: dayjs.duration(90_000),
       outputFormat: HlsDirectOutputFormat(defaultHlsOptions),
-      hlsDirectSubtitle: {
-        videoOutputIndexes: [0],
-        audioOutputIndexes: [0],
-        subtitleOutputIndex: 0,
-        group: 'subs',
-        language: 'eng',
-        default: false,
-      },
     });
 
     const subtitle = new SubtitlesInputSource(
@@ -545,12 +537,9 @@ describe('BasePipelineBuilder', () => {
     );
     const commandArgs = result.getCommandArgs();
 
-    expect(commandArgs).toContain('-var_stream_map');
-    expect(commandArgs).toContain(
-      'v:0,a:0,s:0,sgroup:subs,default:no,language:eng',
+    expect(commandArgs[commandArgs.indexOf('-segment_format') + 1]).toBe(
+      'webvtt',
     );
-    expect(commandArgs).not.toContain('-segment_format');
-    expect(commandArgs).toContain('-hls_subtitle_path');
 
     const subtitleInputIdx = commandArgs.indexOf('/path/to/movie.srt');
     expect(subtitleInputIdx).toBeGreaterThan(0);

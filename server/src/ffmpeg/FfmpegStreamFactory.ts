@@ -20,7 +20,6 @@ import type { Maybe, Nullable } from '@/types/util.js';
 import { isDefined, isLinux, isNonEmptyString } from '@/util/index.js';
 import type { Logger } from '@/util/logging/LoggerFactory.js';
 import { makeLocalUrl } from '@/util/serverUtil.js';
-import languages from '@cospired/i18n-iso-languages';
 import type {
   ChannelStreamMode,
   LoudnormConfig,
@@ -429,7 +428,6 @@ export class FfmpegStreamFactory {
           streamSource,
           streamDetails,
           lineupItem,
-          false,
         ));
     }
 
@@ -792,7 +790,6 @@ export class FfmpegStreamFactory {
     streamSource: HttpStreamSource | FileStreamSource,
     streamDetails: StreamDetails,
     lineupItem: ContentBackedStreamLineupItem,
-    isHlsDirectV2: boolean,
   ): Promise<{
     subtitleSource: Nullable<SubtitlesInputSource>;
     subtitleRendition: SubtitleRenditionInfo | undefined;
@@ -860,31 +857,6 @@ export class FfmpegStreamFactory {
               forced: pickedSubtitleStream.forced,
               title: pickedSubtitleStream.title,
             };
-            if (isHlsDirectV2) {
-              if (!isNonEmptyString(subtitleRendition.language)) {
-                subtitleRendition.language = 'und';
-              }
-              const languageName =
-                languages.getName(subtitleRendition.language, 'en') ??
-                (isNonEmptyString(pickedSubtitleStream.language)
-                  ? pickedSubtitleStream.language
-                  : subtitleRendition.language === 'und'
-                    ? 'Unknown language'
-                    : subtitleRendition.language);
-              subtitleRendition.languageName = languageName;
-              subtitleRendition.sdh = pickedSubtitleStream.sdh;
-              subtitleRendition.title = isNonEmptyString(
-                pickedSubtitleStream.title,
-              )
-                ? pickedSubtitleStream.title
-                : [
-                    languageName,
-                    pickedSubtitleStream.forced ? 'Forced' : undefined,
-                    pickedSubtitleStream.sdh ? 'SDH' : undefined,
-                  ]
-                    .filter(isNonEmptyString)
-                    .join(' ');
-            }
           }
         }
       }

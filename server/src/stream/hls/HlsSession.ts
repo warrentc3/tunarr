@@ -125,22 +125,11 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
           hlsOptions,
         );
       } else if (rendition) {
-        const nativeEntryUpdated =
-          this.sessionOptions.streamMode === 'hls_direct_v2' &&
-          HlsMasterPlaylistMutator.augmentNativeSubtitleMediaTag(
-            lines,
-            rendition,
-          );
-        if (!nativeEntryUpdated && !rendition.nativeHls) {
-          HlsMasterPlaylistMutator.injectSubtitleMediaTag(
-            lines,
-            rendition,
-            hlsOptions,
-          );
-        }
-      } else if (this.sessionOptions.streamMode === 'hls_direct_v2') {
-        // The previous producer's master can still exist during a no-text period.
-        HlsMasterPlaylistMutator.removeSubtitleMediaTag(lines);
+        HlsMasterPlaylistMutator.injectSubtitleMediaTag(
+          lines,
+          rendition,
+          hlsOptions,
+        );
       }
       if (this.#currentAudioRenditions.length > 0) {
         HlsMasterPlaylistMutator.injectAudioMediaTags(
@@ -212,29 +201,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
     if (playlistStart === undefined) {
       throw new Error('HLS playlist start is not initialized');
     }
-    let targetDuration = this.getHlsOptions().hlsTime;
-    if (this.sessionOptions.streamMode === 'hls_direct_v2') {
-      for (const line of playlistLines) {
-        // Copied segments end at source keyframes, not the nominal hls_time.
-        // Preserve FFmpeg's target and cover each actual EXTINF rounded to the
-        // nearest integer, as required by the HLS target-duration contract.
-        const target = /^#EXT-X-TARGETDURATION:(\d+)/.exec(line)?.[1];
-        const duration = /^#EXTINF:([^,]+)/.exec(line)?.[1];
-        const value =
-          target !== undefined
-            ? Number(target)
-            : duration !== undefined
-              ? Math.round(Number(duration))
-              : undefined;
-        if (
-          value !== undefined &&
-          Number.isFinite(value) &&
-          value > targetDuration
-        ) {
-          targetDuration = value;
-        }
-      }
-    }
+    const targetDuration = this.getHlsOptions().hlsTime;
     return this.#hlsPlaylistMutator.trimPlaylist(
       playlistStart,
       filterOpts,
@@ -642,7 +609,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       streamBasePath: basename(this.workingDirectory),
       streamBaseUrl: `/stream/channels/${this.channel.uuid}/${this.sessionType}/`,
       hlsTime: 4,
-      hlsListSize: this.sessionType === 'hls_direct_v2' ? 20 : 0,
+      hlsListSize: 0,
       deleteThreshold: null,
       appendSegments: true,
     };
@@ -842,21 +809,12 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
   private async deleteOldSegmentFiles(
     sequenceNum: number,
     extensions: string[],
-    subtitlePrefix?: string,
-    workingDirectoryFiles?: string[],
   ) {
-    workingDirectoryFiles ??= await fs.readdir(this._workingDirectory);
+    const workingDirectoryFiles = await fs.readdir(this._workingDirectory);
     const segments = filter(
       seq.collect(
         filter(workingDirectoryFiles, (f) => extensions.includes(extname(f))),
         (file) => {
-          if (
-            subtitlePrefix !== undefined &&
-            (!file.startsWith(subtitlePrefix) ||
-              !/^\d+\.vtt$/.test(file.slice(subtitlePrefix.length)))
-          ) {
-            return;
-          }
           const matches = file.match(SegmentNameRegex);
           if (!matches || matches.length < 2) {
             return;
@@ -882,16 +840,13 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       );
     }
 
-    let allDeleted = true;
     for (const { file } of segments) {
       try {
         await fs.unlink(path.join(this._workingDirectory, file));
       } catch (e) {
-        allDeleted = false;
         this.logger.error(e);
       }
     }
-    return allDeleted;
   }
 
   protected async stopStream(options: StopOptions): Promise<void> {

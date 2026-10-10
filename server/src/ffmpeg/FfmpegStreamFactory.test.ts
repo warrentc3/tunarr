@@ -280,9 +280,6 @@ function createCapturingPipelineBuilderFactory(): {
 function makeMockFfmpegInfo(): FfmpegInfo {
   return {
     getVersion: vi.fn().mockResolvedValue(mockFfmpegVersion),
-    probeStreamLayout: vi
-      .fn()
-      .mockResolvedValue({ videoCount: 1, audioCount: 1, hasData: false }),
   } as unknown as FfmpegInfo;
 }
 
@@ -1559,13 +1556,12 @@ describe('FfmpegStreamFactory', () => {
       }
 
       test('fills regular and SDH from one plain input while the forced slot stays empty', async () => {
-        const { capturing, result, selector, details, info } =
-          await directSession({
-            audioDetails: [
-              { index: 1, codec: 'truehd', languageCodeISO6392: 'jpn' },
-              { index: 19, codec: 'aac', languageCodeISO6392: 'eng' },
-            ],
-          });
+        const { capturing, result, selector, details } = await directSession({
+          audioDetails: [
+            { index: 1, codec: 'truehd', languageCodeISO6392: 'jpn' },
+            { index: 19, codec: 'aac', languageCodeISO6392: 'eng' },
+          ],
+        });
         const inputs = capturing.getCapturedAdditionalSubtitleInputs();
         expect(inputs).toHaveLength(2);
         expect(inputs[0]?.path).toBe('/media/input.eng.srt');
@@ -1607,7 +1603,6 @@ describe('FfmpegStreamFactory', () => {
           subtitleStreams: details.subtitleDetails,
         });
         expect(selector.selectAudioAndSubtitleStreams).not.toHaveBeenCalled();
-        expect(info.probeStreamLayout).not.toHaveBeenCalled();
       });
 
       test.each([
@@ -1848,12 +1843,11 @@ describe('FfmpegStreamFactory', () => {
       ])(
         'retains singular subtitle metadata and input in other modes: %o',
         async (options) => {
-          const { info, capturing, result } = await directSession(options);
+          const { capturing, result } = await directSession(options);
           const subtitleInput = capturing.getCapturedSubtitleInput();
           expect(subtitleInput).not.toBeNull();
           expect(subtitleInput?.method).toBe(SubtitleMethods.Convert);
           expect(collectDirectSubtitleRenditions).not.toHaveBeenCalled();
-          expect(info.probeStreamLayout).not.toHaveBeenCalled();
           expect(capturing.getCapturedAdditionalSubtitleInputs()).toEqual([]);
           expect(
             capturing.getCapturedFfmpegState()?.hlsDirectSubtitles,

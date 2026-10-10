@@ -53,32 +53,6 @@ export type FfmpegEncoder = {
   name: string;
 };
 
-export type FfprobeStreamLayout = {
-  videoCount: number;
-  audioCount: number;
-  hasData: boolean;
-};
-
-const FfprobeStreamLayoutSchema = z.object({
-  streams: z
-    .array(
-      z.object({
-        codec_type: z.enum([
-          'video',
-          'audio',
-          'subtitle',
-          'data',
-          'attachment',
-        ]),
-        codec_name: z.string().optional(),
-        disposition: z
-          .object({ attached_pic: z.number().optional() })
-          .optional(),
-      }),
-    )
-    .nonempty(),
-});
-
 const VersionExtractionPattern = /version\s+([^\s]+)\s+.*Copyright/;
 const VersionNumberExtractionPattern = /n?(\d+)\.(\d+)(\.(\d+))?[_\-.]*(.*)/;
 const CoderExtractionPattern = /[A-Z.]+\s([a-z0-9_-]+)\s*(.*)$/;
@@ -431,82 +405,6 @@ export class FfmpegInfo {
           source.duration === undefined ? undefined : source.duration * 1000,
         )
       );
-    } catch {
-      return;
-    }
-  }
-
-  /**
-   * Probe actual mapped streams, including attached-picture dispositions.
-   * Unknown/failed layouts retain the legacy data-preserving subtitle output.
-   */
-  async probeStreamLayout(
-    path: string,
-    headers?: Readonly<Record<string, string>>,
-    timeout: number = 5_000,
-  ): Promise<FfprobeStreamLayout | undefined> {
-    if (!Number.isFinite(timeout) || timeout <= 0) return;
-    const args = [
-      '-v',
-      'error',
-      '-show_entries',
-      'stream=codec_type,codec_name:stream_disposition=attached_pic',
-    ];
-    const headerEntries = Object.entries(headers ?? {});
-    if (headerEntries.length > 0) {
-      if (
-        headerEntries.some(
-          ([name, value]) =>
-            !/^[!#$%&'*+.^_`|~A-Za-z0-9-]+$/.test(name) || /[\r\n]/.test(value),
-        )
-      )
-        return;
-      args.push(
-        '-headers',
-        headerEntries.map(([name, value]) => `${name}: ${value}\r\n`).join(''),
-      );
-    }
-    args.push('-of', 'json', path);
-    try {
-      // The ordinary helper logs argv; source URLs and headers can contain
-      // credentials. Neither argv nor child-process errors are logged here.
-      const output = await new Promise<string>((resolve, reject) => {
-        execFile(
-          this.ffprobePath,
-          args,
-          {
-            timeout: Math.min(timeout, 5_000),
-            maxBuffer: 1024 * 1024,
-            windowsHide: true,
-            encoding: 'utf8',
-          },
-          (error, stdout) => {
-            if (error !== null) {
-              reject(new Error('Unable to probe input stream layout'));
-              return;
-            }
-            resolve(stdout);
-          },
-        );
-      });
-      const parsed = FfprobeStreamLayoutSchema.safeParse(JSON.parse(output));
-      if (!parsed.success) return;
-      return {
-        // Match -map 0:V. Codec/extension is not a cover classification;
-        // unflagged MJPEG and intentionally generated still video remain valid.
-        videoCount: parsed.data.streams.filter(
-          (stream) =>
-            stream.codec_type === 'video' &&
-            stream.disposition?.attached_pic !== 1,
-        ).length,
-        audioCount: parsed.data.streams.filter(
-          (stream) => stream.codec_type === 'audio',
-        ).length,
-        hasData: parsed.data.streams.some(
-          (stream) =>
-            stream.codec_type === 'data' || stream.codec_name === 'bin_data',
-        ),
-      };
     } catch {
       return;
     }
