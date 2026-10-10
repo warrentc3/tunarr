@@ -30,6 +30,7 @@ import type {
   DirectSubtitleSlot,
 } from '@/stream/types.ts';
 import { FileStreamSource, HttpStreamSource } from '@/stream/types.ts';
+import type { AudioInputSource } from '@/ffmpeg/builder/input/AudioInputSource.ts';
 import type { SubtitlesInputSource } from '@/ffmpeg/builder/input/SubtitlesInputSource.ts';
 import { EmptyWebVttInputSource } from '@/ffmpeg/builder/input/EmptyWebVttInputSource.ts';
 import type { VideoInputSource } from '@/ffmpeg/builder/input/VideoInputSource.ts';
@@ -200,6 +201,7 @@ function createCapturingPipelineBuilderFactory(): {
   getCapturedHwAccel: () => string | undefined;
   getCapturedSubtitleInput: () => SubtitlesInputSource | null | undefined;
   getCapturedVideoInput: () => VideoInputSource | undefined;
+  getCapturedAudioInput: () => AudioInputSource | null | undefined;
   getCapturedAdditionalSubtitleInputs: () => SubtitlesInputSource[];
 } {
   let capturedFrameState: FrameState | undefined;
@@ -207,15 +209,12 @@ function createCapturingPipelineBuilderFactory(): {
   let capturedHwAccel: string | undefined;
   let capturedSubtitleInput: SubtitlesInputSource | null | undefined;
   let capturedVideoInput: VideoInputSource | undefined;
+  let capturedAudioInput: AudioInputSource | null | undefined;
   let capturedAdditionalSubtitleInputs: SubtitlesInputSource[] = [];
 
   const factory: PipelineBuilderFactory = () => {
     const builderProxy: Record<string, unknown> = {};
-    for (const method of [
-      'setAudioInputSource',
-      'setWatermarkInputSource',
-      'setConcatInputSource',
-    ]) {
+    for (const method of ['setWatermarkInputSource', 'setConcatInputSource']) {
       builderProxy[method] = vi.fn().mockReturnValue(builderProxy);
     }
 
@@ -223,6 +222,13 @@ function createCapturingPipelineBuilderFactory(): {
       capturedVideoInput = input;
       return builderProxy;
     });
+
+    builderProxy.setAudioInputSource = vi.fn(
+      (input: AudioInputSource | null) => {
+        capturedAudioInput = input;
+        return builderProxy;
+      },
+    );
 
     builderProxy.setSubtitleInputSource = vi.fn(
       (input: SubtitlesInputSource | null) => {
@@ -266,6 +272,7 @@ function createCapturingPipelineBuilderFactory(): {
     getCapturedHwAccel: () => capturedHwAccel,
     getCapturedSubtitleInput: () => capturedSubtitleInput,
     getCapturedVideoInput: () => capturedVideoInput,
+    getCapturedAudioInput: () => capturedAudioInput,
     getCapturedAdditionalSubtitleInputs: () => capturedAdditionalSubtitleInputs,
   };
 }
@@ -1055,6 +1062,43 @@ describe('FfmpegStreamFactory', () => {
       expect(videoInput?.source).toBe(placeholder);
       expect(videoInput?.streams[0]).toBeInstanceOf(StillImageStream);
       expect(videoInput?.hasInputOption(InfiniteLoopInputOption)).toBe(true);
+    });
+
+    test('Direct v2 encodes the placeholder and adds the track as its own audio input', async () => {
+      const {
+        factory,
+        getCapturedVideoInput,
+        getCapturedAudioInput,
+        getCapturedFfmpegState,
+      } = createCapturingPipelineBuilderFactory();
+      const placeholder = new HttpStreamSource(
+        'http://localhost:8000/images/generic-music-screen.png',
+      );
+      const track = new HttpStreamSource('http://example.com/track.flac');
+
+      const result = await makeSut(factory).createStreamSession({
+        stream: {
+          source: track,
+          details: makeAudioOnlyStreamDetails(placeholder),
+        },
+        options: {
+          ...options,
+          outputFormat: HlsDirectOutputFormat(defaultHlsOptions),
+          streamMode: 'hls_direct_v2',
+        },
+        lineupItem: makeLineupItem(),
+      });
+
+      expect(result).not.toBeNull();
+      // The placeholder is input 0 and must be encoded; the media file is a
+      // separate audio input. A copy mapping of `0:V:0` plus `0:<index>`
+      // against the image would match no audio stream at all.
+      expect(getCapturedVideoInput()?.source).toBe(placeholder);
+      expect(getCapturedAudioInput()?.source).toBe(track);
+      const state = getCapturedFfmpegState();
+      expect(state?.outputFormat.type).toBe('hls_direct_v2');
+      expect(state?.hlsDirectStreamCopy).toBeUndefined();
+      expect(state?.copyAllStreams).toBe(false);
     });
 
     test('rejects an audio-only stream without a placeholder image', async () => {

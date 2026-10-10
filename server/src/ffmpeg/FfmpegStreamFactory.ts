@@ -335,13 +335,18 @@ export class FfmpegStreamFactory {
     }
 
     const isRemux = encoding?.mode === 'remux';
+    const isHlsDirectV2 = outputFormat.type === OutputFormatTypes.HlsDirectV2;
+    // A programme with no real video stream (music, audio files, a container
+    // whose only video is cover art) cannot be stream-copied: its video is the
+    // looped placeholder image, which has to be encoded, and the media file
+    // has to be added as its own audio input. Route it through the encoding
+    // pipeline as hls mode does; Direct v2 keeps its fixed subtitle slots.
+    const hasVideoStream = streamDetails.videoDetails !== undefined;
     // Copy source video without normalization. Direct v2 selects one audio
     // through the existing policy; explicit remux keeps its all-stream behavior.
     // Incompatible audio codecs get per-output-stream overrides.
     // Subtitles are still processed as WebVTT sidecar when available.
-    const isPassthrough =
-      isRemux || outputFormat.type === OutputFormatTypes.HlsDirectV2;
-    const isHlsDirectV2 = outputFormat.type === OutputFormatTypes.HlsDirectV2;
+    const isPassthrough = (isRemux || isHlsDirectV2) && hasVideoStream;
     let directAudio: AudioStreamDetails | undefined;
     if (isHlsDirectV2 && streamDetails.audioDetails !== undefined) {
       directAudio = await this.streamSelector.selectAudioStream({
@@ -391,6 +396,22 @@ export class FfmpegStreamFactory {
           playbackParams!,
           { duration, streamMode, watermark },
         ));
+      if (isHlsDirectV2) {
+        // An encoded Direct v2 programme still publishes the channel's fixed
+        // slots, never the transcode path's single selected subtitle.
+        subtitleSource = null;
+        subtitleRendition = undefined;
+        ({
+          sources: directSubtitleSources,
+          renditions: directSubtitleRenditions,
+          outputs: directSubtitleOutputs,
+        } = await this.buildDirectSidecarInputs(
+          streamSource,
+          streamDetails,
+          lineupItem,
+          directSubtitleSlots ?? [],
+        ));
+      }
     } else if (isHlsDirectV2) {
       ({
         sources: directSubtitleSources,
@@ -477,10 +498,11 @@ export class FfmpegStreamFactory {
         subtitleSegmentStartNumber,
         emitEndList: emitEndList ?? false,
         threadCount: isPassthrough ? 0 : this.transcodeConfig.threadCount,
-        copyAllStreams: isRemux && !isHlsDirectV2,
-        hlsDirectStreamCopy: isHlsDirectV2
-          ? { audioInputIndex: directAudio?.index }
-          : undefined,
+        copyAllStreams: isPassthrough && !isHlsDirectV2,
+        hlsDirectStreamCopy:
+          isHlsDirectV2 && isPassthrough
+            ? { audioInputIndex: directAudio?.index }
+            : undefined,
         audioCodecOverrides,
         hlsDirectSubtitles: isHlsDirectV2 ? directSubtitleOutputs : undefined,
         hlsDirectBitrate: isHlsDirectV2
