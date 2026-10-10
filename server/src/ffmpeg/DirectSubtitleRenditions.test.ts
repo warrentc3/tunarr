@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContentBackedStreamLineupItem } from '../db/derived_types/StreamLineup.ts';
 import type { SubtitleStreamDetails } from '../stream/types.ts';
 import { collectDirectSubtitleRenditions } from './DirectSubtitleRenditions.ts';
+import {
+  createDirectSubtitleSlots,
+  fillDirectSubtitleSlots,
+} from './DirectSubtitleSlots.ts';
 import { SubtitleStreamPicker } from './SubtitleStreamPicker.ts';
 
 const { loggerDebug } = vi.hoisted(() => ({ loggerDebug: vi.fn() }));
@@ -57,6 +61,45 @@ describe('Direct subtitle renditions', () => {
   function collect(subtitleStreams: SubtitleStreamDetails[]) {
     return collectDirectSubtitleRenditions({ lineupItem, subtitleStreams });
   }
+
+  it.each(['webvtt', 'vtt', 'VTT'])(
+    'fills channel slots from a cached WebVTT sidecar with codec %s',
+    async (codec) => {
+      const path = join(directory, 'movie.eng.vtt');
+      await writeFile(
+        path,
+        'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nCaption\n',
+      );
+      const subtitle: SubtitleStreamDetails = {
+        type: 'external',
+        codec,
+        default: false,
+        forced: false,
+        sdh: false,
+        languageCodeISO6392: 'eng',
+        path,
+      };
+
+      const available = await collect([subtitle]);
+      expect(available).toHaveLength(1);
+      expect(available[0]?.stream).toMatchObject({
+        type: 'external',
+        codec,
+        index: 0,
+        path,
+      });
+      const filled = fillDirectSubtitleSlots(
+        createDirectSubtitleSlots(['eng']),
+        available,
+      );
+      expect(filled.map(({ rendition }) => rendition?.source)).toEqual([
+        subtitle,
+        subtitle,
+        undefined,
+      ]);
+      expect(resolveExtraction).not.toHaveBeenCalled();
+    },
+  );
 
   it('retains separate sidecar files with identical language and flags', async () => {
     const srt = await sidecar('movie.eng.srt');

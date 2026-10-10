@@ -25,6 +25,7 @@ const textSubtitleCodecs = new Set([
   'subviewer',
   'subrip',
   'webvtt',
+  'vtt', // Emby's WebVTT codec name.
   'mpl2',
   'vplayer',
   'pjs',
