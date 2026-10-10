@@ -114,10 +114,13 @@ export async function evaluateStreamSelectionProfile(
     }
   }
 
-  // No rule matched - fallback to first audio stream, no subtitles
+  // No rule matched. Fall back the same way an unmatched language action does:
+  // the selected track, then the container default, then the first stream.
+  // Direct v2 maps only this one track, so the first-stream shortcut would
+  // put a commentary track on air whenever it sorts before the main audio.
   logger.debug('No stream selection rule matched, using defaults');
   return {
-    audioStream: audioStreams[0],
+    audioStream: selectDefautlAudioStream(audioStreams),
     subtitleStream: null,
   };
 }

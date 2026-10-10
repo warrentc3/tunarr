@@ -123,7 +123,7 @@ describe('StreamSelector audio-only selection', () => {
     expect(await sut.selectAudioStream(input)).toBe(input.audioStreams[0]);
   });
 
-  it('retains first-audio fallback when no rule matches, even with another selected stream', async () => {
+  it('falls back to the selected, then default, audio when no rule matches', async () => {
     const input = request();
     const { selector: sut } = selector([
       {
@@ -132,6 +132,31 @@ describe('StreamSelector audio-only selection', () => {
         subtitleAction: { type: 'default' },
       },
     ]);
+    expect(await sut.selectAudioStream(input)).toBe(input.audioStreams[1]);
+    const selected = input.audioStreams[1];
+    if (selected === undefined) throw new Error('Fixture needs a second audio');
+    selected.selected = false;
     expect(await sut.selectAudioStream(input)).toBe(input.audioStreams[0]);
+  });
+
+  it('does not map a commentary track first when no rule matches', async () => {
+    const input = request();
+    input.audioStreams = [
+      {
+        index: 1,
+        codec: 'aac',
+        languageCodeISO6392: 'eng',
+        title: 'Commentary',
+      },
+      { index: 2, codec: 'aac', languageCodeISO6392: 'eng', default: true },
+    ];
+    const { selector: sut } = selector([
+      {
+        condition: 'program.type == "episode"',
+        audioAction: { type: 'default' },
+        subtitleAction: { type: 'default' },
+      },
+    ]);
+    expect(await sut.selectAudioStream(input)).toBe(input.audioStreams[1]);
   });
 });
