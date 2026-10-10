@@ -1,10 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SubtitleStreamDetails } from '../stream/types.ts';
 import type { DirectSubtitleRendition } from './DirectSubtitleRenditions.ts';
 import {
-  fillDirectSubtitleSlots,
   createDirectSubtitleSlots,
+  directSubtitleLanguage,
+  fillDirectSubtitleSlots,
+  normalizeDirectSubtitleLanguage,
 } from './DirectSubtitleSlots.ts';
+
+const { loggerWarn } = vi.hoisted(() => ({ loggerWarn: vi.fn() }));
+vi.mock('../util/logging/LoggerFactory.ts', () => ({
+  LoggerFactory: { child: () => ({ warn: loggerWarn, debug: vi.fn() }) },
+}));
 
 function source(
   overrides: Partial<SubtitleStreamDetails> = {},
@@ -78,10 +85,64 @@ describe('Direct subtitle channel catalogue', () => {
     expect(createDirectSubtitleSlots([])).toEqual([]);
   });
 
-  it('rejects an invalid configured language explicitly instead of inventing an unknown slot', () => {
-    expect(() => createDirectSubtitleSlots(['invalid-language'])).toThrow(
-      RangeError,
-    );
+  describe('language preferences the table can hold', () => {
+    beforeEach(() => loggerWarn.mockClear());
+
+    it('skips and logs an unresolvable preference instead of failing the session', () => {
+      expect(createDirectSubtitleSlots(['invalid-language'])).toEqual([]);
+      expect(loggerWarn).toHaveBeenCalledOnce();
+      expect(loggerWarn.mock.calls[0]?.[1]).toBe('invalid-language');
+    });
+
+    it('keeps the other preferences when one is unresolvable or empty', () => {
+      expect(
+        createDirectSubtitleSlots(['', 'invalid-language', 'eng']).map(
+          ({ id }) => id,
+        ),
+      ).toEqual(['eng_regular', 'eng_sdh', 'eng_forced']);
+      expect(loggerWarn).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['en-US', 'eng'],
+      ['pt_BR', 'por'],
+      ['EN', 'eng'],
+      ['English', 'eng'],
+      ['ger', 'deu'],
+    ])('resolves %s to %s', (preference, expected) => {
+      expect(
+        createDirectSubtitleSlots([preference]).map(({ language }) => language),
+      ).toEqual([expected, expected, expected]);
+      expect(loggerWarn).not.toHaveBeenCalled();
+    });
+
+    it('keeps ISO 639-2 private-use codes as their own identity', () => {
+      const slots = createDirectSubtitleSlots(['qaa']);
+      expect(slots.map(({ id }) => id)).toEqual([
+        'qaa_regular',
+        'qaa_sdh',
+        'qaa_forced',
+      ]);
+      expect(slots[0]?.title).toBe('qaa Regular');
+      expect(loggerWarn).not.toHaveBeenCalled();
+    });
+
+    it('collapses a script subtag to the base language (known catalogue limit)', () => {
+      expect(
+        createDirectSubtitleSlots(['zh-Hant', 'zh-Hans']).map(({ id }) => id),
+      ).toEqual(['zho_regular', 'zho_sdh', 'zho_forced']);
+    });
+
+    it('matches region-tagged tracks to the base-language slot', () => {
+      expect(directSubtitleLanguage(source({ language: 'en-US' }))).toBe('eng');
+      expect(
+        directSubtitleLanguage(
+          source({ languageCodeISO6392: undefined, languageCodeISO6391: 'pt' }),
+        ),
+      ).toBe('por');
+      expect(normalizeDirectSubtitleLanguage('  ')).toBeUndefined();
+      expect(normalizeDirectSubtitleLanguage('x-unknown')).toBeUndefined();
+    });
   });
 });
 describe('Direct subtitle programme filling', () => {
