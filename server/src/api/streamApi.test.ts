@@ -6,6 +6,31 @@ vi.mock('@/stream/VideoStream.js', () => ({ VideoStream: class {} }));
 import { injectTimestampMap } from './streamApi.js';
 
 describe('injectTimestampMap', () => {
+  test.each(['WEBVTT', 'WEBVTT\n'])(
+    'serves an empty header as a complete probeable WebVTT block: %j',
+    (input) => {
+      const result = injectTimestampMap(input);
+      expect(result).toBe(
+        'WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n',
+      );
+      expect(Buffer.byteLength(result)).toBeGreaterThanOrEqual(16);
+    },
+  );
+
+  test('preserves an existing timestamp map in the header', () => {
+    const input =
+      'WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000\n\n00:00:01.000 --> 00:00:02.000\nHello\n';
+    expect(injectTimestampMap(input)).toBe(input);
+  });
+
+  test('does not mistake cue text for a timestamp-map header', () => {
+    const input =
+      'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nX-TIMESTAMP-MAP=literal cue text\n';
+    expect(injectTimestampMap(input)).toBe(
+      'WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n00:00:01.000 --> 00:00:02.000\nX-TIMESTAMP-MAP=literal cue text\n',
+    );
+  });
+
   test('injects X-TIMESTAMP-MAP after bare WEBVTT header', () => {
     const input = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n';
     const result = injectTimestampMap(input);

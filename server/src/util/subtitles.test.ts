@@ -32,6 +32,15 @@ describe('externalSubtitleDeliveryPath', () => {
     ).toBe('/Videos/item/source/Subtitles/2/Stream.srt');
   });
 
+  it('builds a delivery path for the vtt codec reported by Emby', () => {
+    expect(
+      externalSubtitleDeliveryPath('109', 'mediasource_109', {
+        Index: 3,
+        Codec: 'vtt',
+      }),
+    ).toBe('/Videos/109/mediasource_109/Subtitles/3/Stream.vtt');
+  });
+
   it('falls back to the item id when the media source has no id', () => {
     expect(
       externalSubtitleDeliveryPath('item', null, { Index: 0, Codec: 'ass' }),
@@ -55,6 +64,16 @@ describe('externalSubtitleDeliveryPath', () => {
 });
 
 describe('getSubtitleCacheFilePath', () => {
+  it('caches subtitles reported as vtt as WebVTT files', () => {
+    expect(
+      getSubtitleCacheFilePath(program, {
+        streamIndex: undefined,
+        codec: 'vtt',
+        key: '/Videos/item-1/item-1/Subtitles/3/Stream.vtt',
+      }),
+    ).toMatch(/\.vtt$/);
+  });
+
   it('gives external subtitles of the same codec distinct cache files', () => {
     // Neither has a stream index, so without the key they would collide and
     // one language would be served in place of the other.

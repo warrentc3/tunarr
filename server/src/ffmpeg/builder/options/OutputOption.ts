@@ -61,12 +61,20 @@ export const MapAllStreamsOutputOption = () =>
   makeConstantOutputOption(['-map', '0']);
 
 /**
- * Maps all video, audio, and data streams from the first input but excludes
+ * Maps all non-cover video, audio, and data streams from the first input but excludes
  * subtitle streams. Subtitle codecs like SRT/ASS cannot be muxed directly
  * into HLS/mpegts — they must be handled via separate WebVTT sidecar files.
  */
 export const MapAllNonSubtitleStreamsOutputOption = () =>
-  makeConstantOutputOption(['-map', '0:v', '-map', '0:a', '-map', '0:d?']);
+  makeConstantOutputOption(['-map', '0:V', '-map', '0:a?', '-map', '0:d?']);
+
+/** Direct v2 has one video and the audio chosen by Tunarr's selection policy. */
+export const MapHlsDirectStreamsOutputOption = (audioInputIndex?: number) =>
+  makeConstantOutputOption([
+    '-map',
+    '0:V:0',
+    ...(audioInputIndex === undefined ? [] : ['-map', `0:${audioInputIndex}`]),
+  ]);
 
 export const NoSceneDetectOutputOption = (
   value: number,

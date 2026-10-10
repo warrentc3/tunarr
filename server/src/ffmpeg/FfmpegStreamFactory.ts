@@ -7,10 +7,13 @@ import type { TranscodeConfigOrm } from '@/db/schema/TranscodeConfig.js';
 import { HardwareAccelerationMode } from '@/db/schema/TranscodeConfig.js';
 import { InfiniteLoopInputOption } from '@/ffmpeg/builder/options/input/InfiniteLoopInputOption.js';
 import type {
+  AudioStreamDetails,
   AudioRenditionInfo,
   StreamDetails,
   StreamRenditions,
   SubtitleRenditionInfo,
+  DirectSubtitleRenditionInfo,
+  DirectSubtitleSlot,
 } from '@/stream/types.js';
 import { FileStreamSource, HttpStreamSource } from '@/stream/types.js';
 import type { Maybe, Nullable } from '@/types/util.js';
@@ -43,6 +46,9 @@ import { FfmpegProcess } from './FfmpegProcess.ts';
 import { FfmpegTranscodeSession } from './FfmpegTrancodeSession.ts';
 import { StreamSelector } from './StreamSelector.ts';
 import { SubtitleStreamPicker } from './SubtitleStreamPicker.ts';
+import { collectDirectSubtitleRenditions } from './DirectSubtitleRenditions.ts';
+import type { DirectSubtitleRendition } from './DirectSubtitleRenditions.ts';
+import { fillDirectSubtitleSlots } from './DirectSubtitleSlots.ts';
 import {
   AudioStream,
   EmbeddedSubtitleStream,
@@ -72,6 +78,8 @@ import {
   NullAudioInputSource,
 } from './builder/input/AudioInputSource.ts';
 import { ConcatInputSource } from './builder/input/ConcatInputSource.ts';
+import { EmptyWebVttInputSource } from './builder/input/EmptyWebVttInputSource.ts';
+import type { HlsDirectSubtitleRendition } from './builder/options/HlsDirectSubtitleOutputFormat.ts';
 import { LavfiVideoInputSource } from './builder/input/LavfiVideoInputSource.ts';
 import { SubtitlesInputSource } from './builder/input/SubtitlesInputSource.ts';
 import type { StreamSource as PipelineStreamSource } from './builder/input/InputSource.ts';
@@ -97,6 +105,12 @@ import type {
   TranscodeSessionResult,
 } from './types.ts';
 import { FfmpegInfo } from './ffmpegInfo.ts';
+
+type DirectSubtitleInputs = {
+  sources: SubtitlesInputSource[];
+  renditions: DirectSubtitleRenditionInfo[];
+  outputs: HlsDirectSubtitleRendition[];
+};
 
 @injectable()
 @loggingDef({ category: 'streaming' })
@@ -311,6 +325,7 @@ export class FfmpegStreamFactory {
       isFirstTranscode,
       emitEndList,
       subtitleSegmentStartNumber,
+      directSubtitleSlots,
     },
     lineupItem,
   }: StreamSessionCreateArgs): Promise<Maybe<TranscodeSessionResult>> {
@@ -319,11 +334,36 @@ export class FfmpegStreamFactory {
     }
 
     const isRemux = encoding?.mode === 'remux';
-    // Passthrough mode: copy all video/audio streams from the source without
-    // re-encoding. Incompatible audio codecs get per-stream overrides.
+    const isHlsDirectV2 = outputFormat.type === OutputFormatTypes.HlsDirectV2;
+    // A programme with no real video stream (music, audio files, a container
+    // whose only video is cover art) cannot be stream-copied: its video is the
+    // looped placeholder image, which has to be encoded, and the media file
+    // has to be added as its own audio input. Route it through the encoding
+    // pipeline as hls mode does; Direct v2 keeps its fixed subtitle slots.
+    const hasVideoStream = streamDetails.videoDetails !== undefined;
+    // Copy source video without normalization. Direct v2 selects one audio
+    // through the existing policy; explicit remux keeps its all-stream behavior.
+    // Incompatible audio codecs get per-output-stream overrides.
     // Subtitles are still processed as WebVTT sidecar when available.
-    const isPassthrough =
-      isRemux || outputFormat.type === OutputFormatTypes.HlsDirectV2;
+    const isPassthrough = (isRemux || isHlsDirectV2) && hasVideoStream;
+    let directAudio: AudioStreamDetails | undefined;
+    if (isHlsDirectV2 && streamDetails.audioDetails !== undefined) {
+      directAudio = await this.streamSelector.selectAudioStream({
+        channel: this.channel,
+        lineupItem,
+        audioStreams: streamDetails.audioDetails,
+        subtitleStreams: streamDetails.subtitleDetails ?? [],
+      });
+    }
+    // Use one selected input consistently for mapping, codec overrides, and
+    // rendition metadata. Keep the original details for rule evaluation and
+    // the separate subtitle path.
+    const outputStreamDetails: StreamDetails = isHlsDirectV2
+      ? {
+          ...streamDetails,
+          audioDetails: directAudio === undefined ? undefined : [directAudio],
+        }
+      : streamDetails;
     const playbackParams = isPassthrough
       ? null
       : new FfmpegPlaybackParamsCalculator(
@@ -336,13 +376,15 @@ export class FfmpegStreamFactory {
       streamDetails,
     );
 
-    // In copy-all mode, audio is handled by `-map 0:a` with per-stream codec
-    // overrides — no AudioInputSource needed. Watermark is also skipped since
-    // we're not re-encoding video.
+    // Copy pipelines map the source audio directly with codec overrides;
+    // no AudioInputSource or video watermark is needed.
     let audioInput: Nullable<AudioInputSource> = null;
     let watermarkSource: Nullable<WatermarkInputSource> = null;
     let subtitleSource: Nullable<SubtitlesInputSource> = null;
     let subtitleRendition: SubtitleRenditionInfo | undefined;
+    let directSubtitleSources: SubtitlesInputSource[] = [];
+    let directSubtitleRenditions: DirectSubtitleRenditionInfo[] = [];
+    let directSubtitleOutputs: HlsDirectSubtitleRendition[] = [];
 
     if (!isPassthrough) {
       ({ audioInput, subtitleSource, subtitleRendition, watermarkSource } =
@@ -353,6 +395,33 @@ export class FfmpegStreamFactory {
           playbackParams!,
           { duration, streamMode, watermark },
         ));
+      if (isHlsDirectV2) {
+        // An encoded Direct v2 programme still publishes the channel's fixed
+        // slots, never the transcode path's single selected subtitle.
+        subtitleSource = null;
+        subtitleRendition = undefined;
+        ({
+          sources: directSubtitleSources,
+          renditions: directSubtitleRenditions,
+          outputs: directSubtitleOutputs,
+        } = await this.buildDirectSidecarInputs(
+          streamSource,
+          streamDetails,
+          lineupItem,
+          directSubtitleSlots ?? [],
+        ));
+      }
+    } else if (isHlsDirectV2) {
+      ({
+        sources: directSubtitleSources,
+        renditions: directSubtitleRenditions,
+        outputs: directSubtitleOutputs,
+      } = await this.buildDirectSidecarInputs(
+        streamSource,
+        streamDetails,
+        lineupItem,
+        directSubtitleSlots ?? [],
+      ));
     } else {
       ({ subtitleSource, subtitleRendition } =
         await this.buildPassthroughSubtitles(
@@ -385,7 +454,7 @@ export class FfmpegStreamFactory {
 
     // Build per-stream audio codec overrides for copy-all mode.
     const audioCodecOverrides = isPassthrough
-      ? this.buildAudioCodecOverrides(streamDetails)
+      ? this.buildAudioCodecOverrides(outputStreamDetails)
       : [];
 
     const effectiveHwAccel = isPassthrough
@@ -398,6 +467,7 @@ export class FfmpegStreamFactory {
       .setAudioInputSource(audioInput)
       .setWatermarkInputSource(watermarkSource)
       .setSubtitleInputSource(subtitleSource)
+      .setAdditionalSubtitleInputSources(directSubtitleSources)
       .build();
 
     const pipelineOptions: PipelineOptions = isPassthrough
@@ -426,8 +496,16 @@ export class FfmpegStreamFactory {
         subtitleSegmentStartNumber,
         emitEndList: emitEndList ?? false,
         threadCount: isPassthrough ? 0 : this.transcodeConfig.threadCount,
-        copyAllStreams: isPassthrough,
+        copyAllStreams: isPassthrough && !isHlsDirectV2,
+        hlsDirectStreamCopy:
+          isHlsDirectV2 && isPassthrough
+            ? { audioInputIndex: directAudio?.index }
+            : undefined,
         audioCodecOverrides,
+        hlsDirectSubtitles: isHlsDirectV2 ? directSubtitleOutputs : undefined,
+        hlsDirectBitrate: isHlsDirectV2
+          ? streamDetails.hlsDirectBitrate
+          : undefined,
         outputFormat,
         softwareDeinterlaceFilter: isPassthrough
           ? undefined
@@ -473,16 +551,106 @@ export class FfmpegStreamFactory {
       duration,
     );
 
-    return {
-      session: transcodeSession,
-      renditions: this.buildRenditions(
-        streamDetails,
-        subtitleRendition,
-        isPassthrough,
-      ),
-    };
+    const renditions = this.buildRenditions(
+      outputStreamDetails,
+      subtitleRendition,
+      isPassthrough,
+    );
+    if (isHlsDirectV2) {
+      renditions.subtitles = directSubtitleRenditions;
+      if (directSubtitleRenditions.length > 0)
+        renditions.nativeSubtitleOutput = true;
+    }
+    return { session: transcodeSession, renditions };
   }
 
+  private async buildDirectSidecarInputs(
+    streamSource: HttpStreamSource | FileStreamSource,
+    streamDetails: StreamDetails,
+    lineupItem: ContentBackedStreamLineupItem,
+    slots: readonly DirectSubtitleSlot[],
+  ): Promise<DirectSubtitleInputs> {
+    // The HLS session already gated and froze this catalogue for the tuned
+    // channel. A redirect target's settings must not replace that decision.
+    if (slots.length === 0) {
+      return { sources: [], renditions: [], outputs: [] };
+    }
+    const available = await collectDirectSubtitleRenditions({
+      lineupItem,
+      subtitleStreams: streamDetails.subtitleDetails ?? [],
+    });
+    return this.buildFixedSubtitleInputs(slots, available, streamSource);
+  }
+
+  private buildFixedSubtitleInputs(
+    slots: readonly DirectSubtitleSlot[],
+    available: readonly DirectSubtitleRendition[],
+    streamSource?: HttpStreamSource | FileStreamSource,
+  ): DirectSubtitleInputs {
+    const sources: SubtitlesInputSource[] = [];
+    const outputs: HlsDirectSubtitleRendition[] = [];
+    const inputIndexes = new Map<string, number>();
+    for (const { slot, rendition } of fillDirectSubtitleSlots(
+      slots,
+      available,
+    )) {
+      const stream = rendition?.stream;
+      const key =
+        stream === undefined
+          ? 'empty'
+          : stream.type === 'external'
+            ? `file:${stream.path}`
+            : `embedded:${stream.index}`;
+      let subtitleOutputIndex = inputIndexes.get(key);
+      if (subtitleOutputIndex === undefined) {
+        subtitleOutputIndex = sources.length;
+        inputIndexes.set(key, subtitleOutputIndex);
+        if (stream === undefined) {
+          sources.push(new EmptyWebVttInputSource());
+        } else if (stream.type === 'external') {
+          sources.push(
+            new SubtitlesInputSource(
+              new FileStreamSource(stream.path),
+              [
+                new ExternalSubtitleStream(
+                  stream.codec,
+                  SubtitleMethods.Convert,
+                ),
+              ],
+              SubtitleMethods.Convert,
+            ),
+          );
+        } else {
+          if (streamSource === undefined)
+            throw new Error(
+              'Embedded subtitle input requires its programme source',
+            );
+          sources.push(
+            new SubtitlesInputSource(
+              streamSource,
+              [
+                new EmbeddedSubtitleStream(
+                  stream.codec,
+                  stream.index,
+                  SubtitleMethods.Convert,
+                ),
+              ],
+              SubtitleMethods.Convert,
+            ),
+          );
+        }
+      }
+      outputs.push({
+        id: slot.id,
+        language: slot.language,
+        default: slot.default,
+        subtitleOutputIndex,
+      });
+    }
+    // Frozen channel metadata survives missing tracks and placeholder periods.
+    // SDH fallback and empty slots can reuse one encoded subtitle input.
+    return { sources, outputs, renditions: slots.map((slot) => ({ ...slot })) };
+  }
   /**
    * Builds audio, subtitle, and watermark inputs for transcode mode.
    * In this mode, audio is selected via stream profiles and subtitles are
@@ -749,6 +917,10 @@ export class FfmpegStreamFactory {
   ): Promise<Maybe<TranscodeSessionResult>> {
     const realtime = opts.realtime ?? true;
     const ptsOffset = opts.ptsOffset ?? 0;
+    const directSubtitles =
+      opts.outputFormat.type === OutputFormatTypes.HlsDirectV2
+        ? this.buildFixedSubtitleInputs(opts.directSubtitleSlots ?? [], [])
+        : undefined;
 
     let session: Maybe<FfmpegTranscodeSession>;
     if (opts.kind === 'error') {
@@ -759,6 +931,7 @@ export class FfmpegStreamFactory {
         opts.outputFormat,
         realtime,
         ptsOffset,
+        directSubtitles,
       );
     } else {
       session = await this.createOfflineSession(
@@ -766,12 +939,25 @@ export class FfmpegStreamFactory {
         opts.outputFormat,
         ptsOffset,
         realtime,
+        directSubtitles,
       );
     }
 
     if (!session) return undefined;
 
-    return { session, renditions: { audio: [] } };
+    return {
+      session,
+      renditions: {
+        audio: [],
+        ...(directSubtitles !== undefined
+          ? {
+              subtitles: directSubtitles.renditions,
+              nativeSubtitleOutput:
+                directSubtitles.renditions.length > 0 ? true : undefined,
+            }
+          : {}),
+      },
+    };
   }
 
   private async createErrorSession(
@@ -781,6 +967,7 @@ export class FfmpegStreamFactory {
     outputFormat: OutputFormat,
     realtime: boolean,
     ptsOffset?: number,
+    directSubtitles?: DirectSubtitleInputs,
   ): Promise<Maybe<FfmpegTranscodeSession>> {
     const calculator = new FfmpegPlaybackParamsCalculator(
       this.transcodeConfig,
@@ -845,6 +1032,7 @@ export class FfmpegStreamFactory {
       )
       .setVideoInputSource(errorInput)
       .setAudioInputSource(audioInput)
+      .setAdditionalSubtitleInputSources(directSubtitles?.sources ?? [])
       .build();
 
     const pipeline = builder.build(
@@ -852,6 +1040,7 @@ export class FfmpegStreamFactory {
         version: await this.ffmpegInfo.getVersion(),
         duration,
         ptsOffset,
+        hlsDirectSubtitles: directSubtitles?.outputs,
         threadCount: this.transcodeConfig.threadCount,
         outputFormat,
         softwareDeinterlaceFilter: this.ffmpegSettings.deinterlaceFilter,
@@ -892,6 +1081,7 @@ export class FfmpegStreamFactory {
     outputFormat: OutputFormat,
     ptsOffset: number = 0,
     realtime: boolean = true,
+    directSubtitles?: DirectSubtitleInputs,
   ): Promise<Maybe<FfmpegTranscodeSession>> {
     const offlineInput = VideoInputSource.withStream(
       new HttpStreamSource(
@@ -933,6 +1123,7 @@ export class FfmpegStreamFactory {
       )
       .setVideoInputSource(offlineInput)
       .setAudioInputSource(audioInput)
+      .setAdditionalSubtitleInputSources(directSubtitles?.sources ?? [])
       .build();
 
     const pipeline = builder.build(
@@ -940,6 +1131,7 @@ export class FfmpegStreamFactory {
         version: await this.ffmpegInfo.getVersion(),
         duration,
         ptsOffset,
+        hlsDirectSubtitles: directSubtitles?.outputs,
         threadCount: this.transcodeConfig.threadCount,
         outputFormat,
         softwareDeinterlaceFilter: this.ffmpegSettings.deinterlaceFilter,

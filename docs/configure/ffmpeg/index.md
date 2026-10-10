@@ -68,6 +68,12 @@ When using the **HLS Direct** stream mode, sidecar text-based subtitles are serv
 !!! note
     Sidecar subtitle support is currently experimental. To enable it, go to **Settings > Features** and turn on the sidecar subtitles option.
 
+### HLS Direct v2 Subtitles
+
+With the sidecar feature and channel subtitles enabled, **HLS Direct v2** serves text-based subtitles as selectable WebVTT renditions in its HLS master playlist. The channel's subtitle language filter defines these renditions; no filter means no subtitle renditions. Each configured language has fixed Regular, SDH and Forced options throughout the channel stream.
+
+Each programme fills these options from its embedded and adjacent text tracks. The v2 playback FFmpeg process can convert embedded text directly, without requiring a cached extraction. SDH copies Regular if absent, and SDH-only also fills Regular. Regular and SDH are empty only when neither track exists. Forced remains empty when no forced track exists and never substitutes a full track. Empty slots still produce valid WebVTT segments. Container default/enabled flags do not fill these slots. Image subtitles require burn-in and are excluded from v2.
+
 ### Language Preference
 
 Currently, language preferences can only be configured globally. Use this setting to set an ordered list of preferred audio languages. The first matching audio language stream for a given piece of content will be chosen.

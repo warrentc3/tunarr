@@ -53,6 +53,7 @@ class PipelineBuilderFactory$Builder {
   private concatInputSource: Nullable<ConcatInputSource> = null;
   private watermarkInputSource: Nullable<WatermarkInputSource> = null;
   private subtiitleInputSource: Nullable<SubtitlesInputSource> = null;
+  private additionalSubtitleInputSources: readonly SubtitlesInputSource[] = [];
   private hardwareAccelerationMode: HardwareAccelerationMode =
     HardwareAccelerationMode.None;
 
@@ -96,6 +97,13 @@ class PipelineBuilderFactory$Builder {
     return this;
   }
 
+  setAdditionalSubtitleInputSources(
+    sources: readonly SubtitlesInputSource[],
+  ): this {
+    this.additionalSubtitleInputSources = sources;
+    return this;
+  }
+
   setHardwareAccelerationMode(
     hardwareAccelerationMode: HardwareAccelerationMode,
   ): PipelineBuilderFactory$Builder {
@@ -126,7 +134,11 @@ class PipelineBuilderFactory$Builder {
           this.concatInputSource,
           this.watermarkInputSource,
           this.subtiitleInputSource,
-        ).setFeatureFlagService(this.featureFlagService);
+        )
+          .setFeatureFlagService(this.featureFlagService)
+          .setAdditionalSubtitleInputSources(
+            this.additionalSubtitleInputSources,
+          );
       case HardwareAccelerationMode.Qsv:
         return new QsvPipelineBuilder(
           hardwareCapabilities,
@@ -136,7 +148,11 @@ class PipelineBuilderFactory$Builder {
           this.concatInputSource,
           this.watermarkInputSource,
           this.subtiitleInputSource,
-        ).setFeatureFlagService(this.featureFlagService);
+        )
+          .setFeatureFlagService(this.featureFlagService)
+          .setAdditionalSubtitleInputSources(
+            this.additionalSubtitleInputSources,
+          );
       case HardwareAccelerationMode.Vaapi:
         return new VaapiPipelineBuilder(
           hardwareCapabilities,
@@ -146,7 +162,11 @@ class PipelineBuilderFactory$Builder {
           this.watermarkInputSource,
           this.subtiitleInputSource,
           this.concatInputSource,
-        ).setFeatureFlagService(this.featureFlagService);
+        )
+          .setFeatureFlagService(this.featureFlagService)
+          .setAdditionalSubtitleInputSources(
+            this.additionalSubtitleInputSources,
+          );
       case HardwareAccelerationMode.Videotoolbox:
         return new VideoToolboxPipelineBuilder(
           hardwareCapabilities,
@@ -156,7 +176,11 @@ class PipelineBuilderFactory$Builder {
           this.concatInputSource,
           this.watermarkInputSource,
           this.subtiitleInputSource,
-        ).setFeatureFlagService(this.featureFlagService);
+        )
+          .setFeatureFlagService(this.featureFlagService)
+          .setAdditionalSubtitleInputSources(
+            this.additionalSubtitleInputSources,
+          );
       default:
         return new SoftwarePipelineBuilder(
           this.videoInputSource,
@@ -165,7 +189,11 @@ class PipelineBuilderFactory$Builder {
           this.subtiitleInputSource,
           this.concatInputSource,
           binaryCapabilities,
-        ).setFeatureFlagService(this.featureFlagService);
+        )
+          .setFeatureFlagService(this.featureFlagService)
+          .setAdditionalSubtitleInputSources(
+            this.additionalSubtitleInputSources,
+          );
     }
   }
 }

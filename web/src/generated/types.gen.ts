@@ -101,6 +101,8 @@ export type TerminalProgramInput = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -119,6 +121,8 @@ export type TerminalProgramInput = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -128,9 +132,13 @@ export type TerminalProgramInput = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -243,6 +251,8 @@ export type TerminalProgramInput = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -261,6 +271,8 @@ export type TerminalProgramInput = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -270,9 +282,13 @@ export type TerminalProgramInput = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -387,6 +403,8 @@ export type TerminalProgramInput = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -405,6 +423,8 @@ export type TerminalProgramInput = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -414,9 +434,13 @@ export type TerminalProgramInput = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -697,6 +721,8 @@ export type SeasonInput = {
                 streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
                 title?: string | null;
                 hasAttachedPicture?: boolean | null;
+                bitrate?: number | null;
+                statisticsBitrate?: number | null;
                 fileName?: string | null;
                 mimeType?: string | null;
                 frameRate?: string | number | null;
@@ -715,6 +741,8 @@ export type SeasonInput = {
                 forced?: boolean | null;
             }>;
             duration: number;
+            bitrate?: number | null;
+            container?: string | null;
             sampleAspectRatio?: string | null;
             displayAspectRatio?: string | null;
             frameRate?: number | string | null;
@@ -724,9 +752,13 @@ export type SeasonInput = {
             } | null;
             locations: Array<{
                 path: string;
+                sizeBytes?: number | null;
+                duration?: number | null;
                 type: 'local';
             } | {
                 path: string;
+                sizeBytes?: number | null;
+                duration?: number | null;
                 type: 'remote';
                 sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
                 externalKey: string;
@@ -845,6 +877,8 @@ export type EpisodeInput = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -863,6 +897,8 @@ export type EpisodeInput = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -872,9 +908,13 @@ export type EpisodeInput = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -1127,6 +1167,8 @@ export type MusicAlbumInput = {
                 streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
                 title?: string | null;
                 hasAttachedPicture?: boolean | null;
+                bitrate?: number | null;
+                statisticsBitrate?: number | null;
                 fileName?: string | null;
                 mimeType?: string | null;
                 frameRate?: string | number | null;
@@ -1145,6 +1187,8 @@ export type MusicAlbumInput = {
                 forced?: boolean | null;
             }>;
             duration: number;
+            bitrate?: number | null;
+            container?: string | null;
             sampleAspectRatio?: string | null;
             displayAspectRatio?: string | null;
             frameRate?: number | string | null;
@@ -1154,9 +1198,13 @@ export type MusicAlbumInput = {
             } | null;
             locations: Array<{
                 path: string;
+                sizeBytes?: number | null;
+                duration?: number | null;
                 type: 'local';
             } | {
                 path: string;
+                sizeBytes?: number | null;
+                duration?: number | null;
                 type: 'remote';
                 sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
                 externalKey: string;
@@ -1284,6 +1332,8 @@ export type MusicTrackInput = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -1302,6 +1352,8 @@ export type MusicTrackInput = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -1311,9 +1363,13 @@ export type MusicTrackInput = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -1513,6 +1569,8 @@ export type TerminalProgram = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -1531,6 +1589,8 @@ export type TerminalProgram = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -1540,9 +1600,13 @@ export type TerminalProgram = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -1655,6 +1719,8 @@ export type TerminalProgram = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -1673,6 +1739,8 @@ export type TerminalProgram = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -1682,9 +1750,13 @@ export type TerminalProgram = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -1799,6 +1871,8 @@ export type TerminalProgram = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -1817,6 +1891,8 @@ export type TerminalProgram = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -1826,9 +1902,13 @@ export type TerminalProgram = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -2109,6 +2189,8 @@ export type Season = {
                 streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
                 title?: string | null;
                 hasAttachedPicture?: boolean | null;
+                bitrate?: number | null;
+                statisticsBitrate?: number | null;
                 fileName?: string | null;
                 mimeType?: string | null;
                 frameRate?: string | number | null;
@@ -2127,6 +2209,8 @@ export type Season = {
                 forced?: boolean | null;
             }>;
             duration: number;
+            bitrate?: number | null;
+            container?: string | null;
             sampleAspectRatio?: string | null;
             displayAspectRatio?: string | null;
             frameRate?: number | string | null;
@@ -2136,9 +2220,13 @@ export type Season = {
             } | null;
             locations: Array<{
                 path: string;
+                sizeBytes?: number | null;
+                duration?: number | null;
                 type: 'local';
             } | {
                 path: string;
+                sizeBytes?: number | null;
+                duration?: number | null;
                 type: 'remote';
                 sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
                 externalKey: string;
@@ -2257,6 +2345,8 @@ export type Episode = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -2275,6 +2365,8 @@ export type Episode = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -2284,9 +2376,13 @@ export type Episode = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -2539,6 +2635,8 @@ export type MusicAlbum = {
                 streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
                 title?: string | null;
                 hasAttachedPicture?: boolean | null;
+                bitrate?: number | null;
+                statisticsBitrate?: number | null;
                 fileName?: string | null;
                 mimeType?: string | null;
                 frameRate?: string | number | null;
@@ -2557,6 +2655,8 @@ export type MusicAlbum = {
                 forced?: boolean | null;
             }>;
             duration: number;
+            bitrate?: number | null;
+            container?: string | null;
             sampleAspectRatio?: string | null;
             displayAspectRatio?: string | null;
             frameRate?: number | string | null;
@@ -2566,9 +2666,13 @@ export type MusicAlbum = {
             } | null;
             locations: Array<{
                 path: string;
+                sizeBytes?: number | null;
+                duration?: number | null;
                 type: 'local';
             } | {
                 path: string;
+                sizeBytes?: number | null;
+                duration?: number | null;
                 type: 'remote';
                 sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
                 externalKey: string;
@@ -2696,6 +2800,8 @@ export type MusicTrack = {
             streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
             title?: string | null;
             hasAttachedPicture?: boolean | null;
+            bitrate?: number | null;
+            statisticsBitrate?: number | null;
             fileName?: string | null;
             mimeType?: string | null;
             frameRate?: string | number | null;
@@ -2714,6 +2820,8 @@ export type MusicTrack = {
             forced?: boolean | null;
         }>;
         duration: number;
+        bitrate?: number | null;
+        container?: string | null;
         sampleAspectRatio?: string | null;
         displayAspectRatio?: string | null;
         frameRate?: number | string | null;
@@ -2723,9 +2831,13 @@ export type MusicTrack = {
         } | null;
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -11484,6 +11596,8 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                     streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
                     title?: string | null;
                     hasAttachedPicture?: boolean | null;
+                    bitrate?: number | null;
+                    statisticsBitrate?: number | null;
                     fileName?: string | null;
                     mimeType?: string | null;
                     frameRate?: string | number | null;
@@ -11502,6 +11616,8 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                     forced?: boolean | null;
                 }>;
                 duration: number;
+                bitrate?: number | null;
+                container?: string | null;
                 sampleAspectRatio?: string | null;
                 displayAspectRatio?: string | null;
                 frameRate?: number | string | null;
@@ -11511,9 +11627,13 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                 } | null;
                 locations: Array<{
                     path: string;
+                    sizeBytes?: number | null;
+                    duration?: number | null;
                     type: 'local';
                 } | {
                     path: string;
+                    sizeBytes?: number | null;
+                    duration?: number | null;
                     type: 'remote';
                     sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
                     externalKey: string;
@@ -11628,6 +11748,8 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                     streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
                     title?: string | null;
                     hasAttachedPicture?: boolean | null;
+                    bitrate?: number | null;
+                    statisticsBitrate?: number | null;
                     fileName?: string | null;
                     mimeType?: string | null;
                     frameRate?: string | number | null;
@@ -11646,6 +11768,8 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                     forced?: boolean | null;
                 }>;
                 duration: number;
+                bitrate?: number | null;
+                container?: string | null;
                 sampleAspectRatio?: string | null;
                 displayAspectRatio?: string | null;
                 frameRate?: number | string | null;
@@ -11655,9 +11779,13 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                 } | null;
                 locations: Array<{
                     path: string;
+                    sizeBytes?: number | null;
+                    duration?: number | null;
                     type: 'local';
                 } | {
                     path: string;
+                    sizeBytes?: number | null;
+                    duration?: number | null;
                     type: 'remote';
                     sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
                     externalKey: string;
@@ -11770,6 +11898,8 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                     streamType: 'video' | 'audio' | 'subtitles' | 'attachment' | 'external_subtitles';
                     title?: string | null;
                     hasAttachedPicture?: boolean | null;
+                    bitrate?: number | null;
+                    statisticsBitrate?: number | null;
                     fileName?: string | null;
                     mimeType?: string | null;
                     frameRate?: string | number | null;
@@ -11788,6 +11918,8 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                     forced?: boolean | null;
                 }>;
                 duration: number;
+                bitrate?: number | null;
+                container?: string | null;
                 sampleAspectRatio?: string | null;
                 displayAspectRatio?: string | null;
                 frameRate?: number | string | null;
@@ -11797,9 +11929,13 @@ export type GetApiPlexByMediaSourceIdSearchResponses = {
                 } | null;
                 locations: Array<{
                     path: string;
+                    sizeBytes?: number | null;
+                    duration?: number | null;
                     type: 'local';
                 } | {
                     path: string;
+                    sizeBytes?: number | null;
+                    duration?: number | null;
                     type: 'remote';
                     sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
                     externalKey: string;
@@ -11846,9 +11982,13 @@ export type GetApiPlexByMediaSourceIdLibrariesResponses = {
         type: 'library';
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -12171,9 +12311,13 @@ export type GetJellyfinLibrariesResponses = {
         type: 'library';
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;
@@ -12851,9 +12995,13 @@ export type GetApiEmbyByMediaSourceIdUserLibrariesResponses = {
         type: 'library';
         locations: Array<{
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'local';
         } | {
             path: string;
+            sizeBytes?: number | null;
+            duration?: number | null;
             type: 'remote';
             sourceType: 'plex' | 'jellyfin' | 'emby' | 'local';
             externalKey: string;

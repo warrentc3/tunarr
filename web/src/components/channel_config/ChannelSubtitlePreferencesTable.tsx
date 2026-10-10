@@ -18,7 +18,11 @@ import { LanguageAutocomplete } from '../LanguageAutocomplete.tsx';
 
 const TableName = 'ChannelSubtitlePreferencesTable';
 
-export const ChannelSubtitlePreferencesTable = () => {
+export const ChannelSubtitlePreferencesTable = ({
+  languageFilterOnly = false,
+}: {
+  languageFilterOnly?: boolean;
+}) => {
   const { t } = useLingui();
   const { watch, control, setValue } = useChannelFormContext();
   const prefFields = useFieldArray({ control, name: 'subtitlePreferences' });
@@ -26,7 +30,7 @@ export const ChannelSubtitlePreferencesTable = () => {
   const tableSettings = useStoreBackedTableSettings(TableName);
 
   const columns = useMemo<MRT_ColumnDef<SubtitlePreference>[]>(() => {
-    return [
+    const allColumns: MRT_ColumnDef<SubtitlePreference>[] = [
       {
         header: t`Priority`,
         accessorKey: 'priority',
@@ -134,7 +138,13 @@ export const ChannelSubtitlePreferencesTable = () => {
         }),
       },
     ];
-  }, [setValue]);
+    return languageFilterOnly
+      ? allColumns.filter(
+          (column) =>
+            column.accessorKey === 'priority' || column.id === 'langugeCode',
+        )
+      : allColumns;
+  }, [languageFilterOnly, setValue, t]);
 
   const renderLanguageAutoComplete = () => {
     return (
@@ -153,7 +163,9 @@ export const ChannelSubtitlePreferencesTable = () => {
         }
         onRemove={() => {}}
         textFieldProps={{
-          label: t`Add Language Preference`,
+          label: languageFilterOnly
+            ? t`Add Subtitle Language`
+            : t`Add Language Preference`,
         }}
       />
     );
@@ -167,7 +179,7 @@ export const ChannelSubtitlePreferencesTable = () => {
     autoResetPageIndex: false,
     enableRowOrdering: true,
     enableRowActions: true,
-    enableEditing: true,
+    enableEditing: !languageFilterOnly,
     editDisplayMode: 'cell',
     positionActionsColumn: 'last',
     displayColumnDefOptions: {

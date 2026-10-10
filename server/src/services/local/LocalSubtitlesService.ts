@@ -2,7 +2,7 @@ import { isNonEmptyString } from '@tunarr/shared/util';
 import type { MediaSubtitles } from '@tunarr/types';
 import { injectable } from 'inversify';
 import fs from 'node:fs/promises';
-import { basename, dirname, extname } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { match, P } from 'ts-pattern';
 import type { Nullable } from '../../types/util.ts';
 import type { Logger } from '../../util/logging/LoggerFactory.ts';
@@ -33,10 +33,9 @@ export class LocalSubtitlesService {
         continue;
       }
 
-      const filename = basename(dirent.name, extname(dirent.name));
       const parsedSubtitles = LocalSubtitlesService.parseSubtitleFilePath(
-        itemName,
-        filename,
+        fullItemPath,
+        join(dirname(fullItemPath), dirent.name),
       );
 
       if (!parsedSubtitles) {
@@ -55,7 +54,8 @@ export class LocalSubtitlesService {
   ): Nullable<MediaSubtitles> {
     const itemName = basename(originalItemPath, extname(originalItemPath));
     const fileName = basename(fullPath);
-    const codec = match(extname(fileName))
+    const extension = extname(fileName);
+    const codec = match(extension.toLowerCase())
       .with(P.union('.ssa', '.ass'), () => 'ass')
       .with('.srt', () => 'subrip')
       .with('.vtt', () => 'webvtt')
@@ -65,22 +65,68 @@ export class LocalSubtitlesService {
       return null;
     }
 
-    // Subtitles generally are meant to be in the form {media_name}.{lang}(.{opts})*.{codec_ext}
-    // At this point we've removed the codec_ext and we want to read out the options in the filename
-    // and then derive the language.
-    const [lang = '', ...opts] = fileName
-      .replace(itemName, '')
+    const subtitleName = basename(fileName, extension);
+    if (!subtitleName.startsWith(itemName)) {
+      return null;
+    }
+
+    // Interpret only the suffix after the complete video basename, so a
+    // language or flag in the title is not mistaken for subtitle metadata.
+    const suffix = subtitleName.slice(itemName.length);
+    if (suffix.length > 0 && !/^[.\s_-]/.test(suffix)) {
+      return null;
+    }
+    // The suffix is a strict grammar: dot- or space-separated tokens, each a
+    // flag, a language, or a language joined by '-' or '_' to a region or
+    // script qualifier or to a flag (pt-BR, zh-Hant, eng_sdh). Any other
+    // token means the file belongs to a sibling title whose name extends this
+    // video's, such as "Episode 2.eng.srt" beside "Episode.mkv", and is not
+    // this video's subtitle at all.
+    const flagTokens = new Set(['forced', 'sdh', 'cc', 'hi', 'default']);
+    const privateUse = /^q[a-t][a-z]$/;
+    const flags = new Set<string>();
+    const languageTokens: string[] = [];
+    for (const token of suffix
       .toLowerCase()
-      .split('.')
-      .filter((s) => s.length > 0);
-
-    const sdh =
-      opts.includes('hi') || opts.includes('cc') || opts.includes('sdh');
-    const forced = opts.includes('forced');
-
-    const maybeLang3T = LanguageService.getAlpha3TCode(
-      lang.split(/[-_]/)?.[0] ?? lang,
-    );
+      .split(/[.\s]+/)
+      .filter((s) => s.length > 0)) {
+      if (flagTokens.has(token)) {
+        flags.add(token);
+        continue;
+      }
+      const [head, ...qualifiers] = token
+        .split(/[-_]+/)
+        .filter((s) => s.length > 0);
+      if (
+        head === undefined ||
+        (!isNonEmptyString(LanguageService.normalizeToAlpha3T(head)) &&
+          !privateUse.test(head))
+      ) {
+        return null;
+      }
+      for (const qualifier of qualifiers) {
+        if (flagTokens.has(qualifier)) {
+          flags.add(qualifier);
+        } else if (!/^[a-z]{2,4}$/.test(qualifier)) {
+          return null;
+        }
+      }
+      languageTokens.push(head);
+    }
+    if (languageTokens.length > 1) {
+      return null;
+    }
+    // HI is Hindi when it is the only language token; alongside another
+    // language it is the established hearing-impaired filename marker.
+    let lang = languageTokens[0] ?? '';
+    let hearingImpaired = flags.has('hi');
+    if (lang === '' && hearingImpaired) {
+      lang = 'hi';
+      hearingImpaired = false;
+    }
+    const sdh = flags.has('sdh') || flags.has('cc') || hearingImpaired;
+    const forced = flags.has('forced');
+    const maybeLang3T = LanguageService.normalizeToAlpha3T(lang);
 
     if (isNonEmptyString(maybeLang3T)) {
       return {

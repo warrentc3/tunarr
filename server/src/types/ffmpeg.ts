@@ -7,6 +7,14 @@ const BaseFfprobeMediaStreamSchema = z.object({
   codec_long_name: z.string().optional(),
   profile: z.string().optional(),
   tags: z.record(z.string(), z.string()).optional(),
+  disposition: z
+    .object({
+      default: z.number().optional(),
+      forced: z.number().optional(),
+      hearing_impaired: z.number().optional(),
+      attached_pic: z.number().optional(),
+    })
+    .optional(),
 });
 
 const FfprobeVideoStreamSchema = BaseFfprobeMediaStreamSchema.extend({
@@ -127,8 +135,8 @@ const FfprobeMediaFormatSchema = z.object({
   format_long_name: z.string().optional(),
   start_time: z.string().optional(),
   duration: z.coerce.number(), // Seconds
-  size: z.coerce.number(),
-  bit_rate: z.coerce.number(),
+  size: z.coerce.number().optional(),
+  bit_rate: z.coerce.number().optional(),
   probe_score: z.number().optional(),
   tags: z.record(z.string(), z.string()).optional(),
 });

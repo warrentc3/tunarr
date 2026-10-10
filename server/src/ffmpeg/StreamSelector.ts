@@ -32,12 +32,21 @@ export class StreamSelector {
     @inject(CelEvaluationService) private celService: CelEvaluationService,
   ) {}
 
-  async selectAudioAndSubtitleStreams({
-    channel,
-    lineupItem,
-    audioStreams,
-    subtitleStreams,
-  }: StreamSelectRequest) {
+  async selectAudioAndSubtitleStreams(request: StreamSelectRequest) {
+    return this.selectStreams(request, false);
+  }
+
+  async selectAudioStream(
+    request: StreamSelectRequest,
+  ): Promise<AudioStreamDetails> {
+    const { audioStream } = await this.selectStreams(request, true);
+    return audioStream;
+  }
+
+  private async selectStreams(
+    { channel, lineupItem, audioStreams, subtitleStreams }: StreamSelectRequest,
+    audioOnly: boolean,
+  ) {
     const selectionCtx = {
       channelId: channel.uuid,
       programId: lineupItem.program.uuid,
@@ -50,6 +59,8 @@ export class StreamSelector {
     };
 
     const profile = await this.streamSelectionResolver.resolve(selectionCtx);
+    // Audio rules may depend on subtitle availability. Keep that context even
+    // when the caller only wants audio and handles subtitle selection elsewhere.
     const celContext = buildCelContext(
       audioStreams,
       subtitleStreams,
@@ -64,6 +75,7 @@ export class StreamSelector {
       this.celService,
       celContext,
       lineupItem,
+      { audioOnly },
     );
   }
 }

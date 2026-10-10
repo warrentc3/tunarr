@@ -49,6 +49,71 @@ function makeLineupItem(): ContentBackedStreamLineupItem {
 }
 
 describe('SubtitleStreamPicker', () => {
+  const image: SubtitleStreamDetails = {
+    type: 'embedded',
+    codec: 'hdmv_pgs_subtitle',
+    index: 2,
+    default: true,
+    forced: true,
+    sdh: false,
+    languageCodeISO6392: 'eng',
+  };
+  const text: SubtitleStreamDetails = {
+    ...image,
+    codec: 'subrip',
+    index: 3,
+    default: false,
+  };
+
+  it('filters a default image before default-or-first passthrough selection', async () => {
+    expect(
+      await SubtitleStreamPicker.pickSubtitles(
+        [],
+        makeLineupItem(),
+        [image, text],
+        { preferTextBased: true },
+      ),
+    ).toBe(text);
+  });
+
+  it('filters images before language and forced preferences even when images are allowed', async () => {
+    expect(
+      await SubtitleStreamPicker.pickSubtitles(
+        [
+          {
+            uuid: 'pref',
+            channelId: 'channel',
+            languageCode: 'eng',
+            priority: 0,
+            allowImageBased: true,
+            allowExternal: true,
+            filterType: 'forced',
+          },
+        ],
+        makeLineupItem(),
+        [image, text],
+        { preferTextBased: true },
+      ),
+    ).toBe(text);
+  });
+
+  it('returns no passthrough selection for image-only media', async () => {
+    expect(
+      await SubtitleStreamPicker.pickSubtitles([], makeLineupItem(), [image], {
+        preferTextBased: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('retains image selection for a caller that can burn subtitles', async () => {
+    expect(
+      await SubtitleStreamPicker.pickSubtitles([], makeLineupItem(), [
+        image,
+        text,
+      ]),
+    ).toBe(image);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

@@ -8,6 +8,7 @@ import { OutputOption } from './OutputOption.ts';
  */
 export class HlsDirectOutputFormat extends OutputOption {
   public static SegmentSeconds = 4;
+  public static PlaylistSize = 20;
 
   constructor(
     private playlistPath: string,
@@ -26,7 +27,7 @@ export class HlsDirectOutputFormat extends OutputOption {
       '-hls_time',
       `${HlsDirectOutputFormat.SegmentSeconds}`,
       '-hls_list_size',
-      '0',
+      `${HlsDirectOutputFormat.PlaylistSize}`,
       '-segment_list_flags',
       '+live',
       '-hls_segment_type',
@@ -40,7 +41,10 @@ export class HlsDirectOutputFormat extends OutputOption {
       'playlist.m3u8',
     ];
 
-    const flags = ['program_date_time', 'append_list', 'independent_segments'];
+    // Each programme is produced ahead of airtime by a new FFmpeg process.
+    // Its wall-clock PROGRAM-DATE-TIME would overlap the preceding programme.
+    // Direct playlists use native sequence numbers and discontinuities instead.
+    const flags = ['append_list', 'independent_segments'];
     if (!this.emitEndList) flags.push('omit_endlist');
     if (!this.isFirstTranscode) flags.push('discont_start');
 

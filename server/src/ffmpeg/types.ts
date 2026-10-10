@@ -3,6 +3,7 @@ import type { ChannelConcatStreamMode } from '@tunarr/types/schemas';
 import type { Duration } from 'dayjs/plugin/duration.js';
 import type { ContentBackedStreamLineupItem } from '../db/derived_types/StreamLineup.ts';
 import type {
+  DirectSubtitleSlot,
   StreamDetails,
   StreamRenditions,
   StreamSource,
@@ -25,6 +26,7 @@ export type PlaceholderSessionOpts = {
   outputFormat: OutputFormat;
   realtime?: boolean;
   ptsOffset?: number;
+  directSubtitleSlots?: readonly DirectSubtitleSlot[];
 } & ({ kind: 'error'; title: string; subtitle?: string } | { kind: 'offline' });
 
 export const ConcatStreamModeToChildMode: Record<
@@ -67,6 +69,8 @@ export type StreamOptions = {
   realtime?: boolean; // = true,
   extraInputHeaders?: Record<string, string>;
   outputFormat: OutputFormat;
+  /** Channel-owned, fixed subtitle catalogue shared by every programme. */
+  directSubtitleSlots?: readonly DirectSubtitleSlot[];
   ptsOffset?: number;
   /**
    * Segment/file number to continue the WebVTT subtitle sidecar's `segment`

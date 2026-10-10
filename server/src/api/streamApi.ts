@@ -31,6 +31,13 @@ import { container } from '../container.ts';
 // the same -output_ts_offset as the video output, keeping cue timestamps
 // aligned with the 90kHz PTS timeline starting at 0.
 export function injectTimestampMap(vttContent: string): string {
+  const header = vttContent.split(/\r?\n\r?\n/, 1)[0] ?? '';
+  if (/^X-TIMESTAMP-MAP=/m.test(header)) return vttContent;
+  if (/^WEBVTT(?:[ \t][^\r\n]*)?\r?\n?$/.test(vttContent)) {
+    // Native empty segments contain only the header. Keep a complete header
+    // block, and enough bytes for clients such as VLC to recognize WebVTT.
+    return `${vttContent.trimEnd()}\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n`;
+  }
   return vttContent.replace(
     /^(WEBVTT[^\n]*)(\r?\n)/,
     '$1$2X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n',
@@ -335,13 +342,18 @@ export const streamApi: RouterPluginAsyncCallback = async (fastify) => {
       }
 
       if (
-        req.params.file === 'subs.m3u8' &&
-        (req.params.sessionType === 'hls' ||
+        (req.params.file === 'subs.m3u8' && req.params.sessionType === 'hls') ||
+        (req.params.file.endsWith('.m3u8') &&
           req.params.sessionType === 'hls_direct_v2')
       ) {
-        const playlistResult = await (
-          session as HlsSession
-        ).trimSubtitlePlaylist();
+        const hlsSession = session as HlsSession;
+        if (!hlsSession.isSubtitlePlaylist(req.params.file)) {
+          return res.status(404).send('Subtitle playlist not found');
+        }
+        const playlistResult = await hlsSession.trimSubtitlePlaylist(
+          undefined,
+          req.params.file,
+        );
         if (playlistResult.isFailure()) {
           logger.error(playlistResult.error);
           return res.status(500).send('Error retrieving subtitle playlist');

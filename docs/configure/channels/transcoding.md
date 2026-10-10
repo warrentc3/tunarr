@@ -46,7 +46,21 @@ Because this mode does not perform stream normalization, there may be issues whe
 
 #### How does it work?
 
-HLS Direct v2 works like standard HLS mode, but without transcoding. Rather than returning a single-item m3u8 pointing directly to the program stream (as HLS Direct does), it produces a proper continuous HLS playlist of segmented chunks — the same structure as the regular HLS mode. No codec conversion or normalization is applied; the source content is remuxed directly into the segments.
+HLS Direct v2 produces a continuous HLS playlist of segmented chunks, using the same structure as regular HLS mode. Source video is copied into the segments. Audio codecs incompatible with the output container can be converted. HLS Direct instead returns a single-item m3u8 pointing directly to the program stream.
+
+Direct v2 maps one non-cover video and one audio track. Audio selection uses the applicable stream-selection profile, or the global audio language preferences when no profile applies. The selected input becomes the single output audio track; other source audio tracks are not advertised as alternatives. Existing DTS/TrueHD compatibility conversion to AC-3 still applies to the selected track.
+
+Tunarr retains source and track bitrate information during library scans and uses it to supply the HLS master playlist's bandwidth estimate. Matroska track statistics are read when available. Force-rescan existing libraries after upgrading to populate this metadata; records without it use playback-time measurement as a fallback. The estimate does not change the copied video or require converting the source file to another container.
+
+With the experimental sidecar feature and channel subtitles enabled, the channel's ordered subtitle language filter defines its selectable WebVTT renditions. With no language filter, subtitles are disabled. Each configured language has three fixed options: Regular, SDH and Forced. Their names and playlist URLs remain the same across programmes; clients do not need a new master to discover the next programme's tracks.
+
+Regular uses a plain dialogue track, excluding forced and SDH tracks. If only SDH exists, it also fills Regular. SDH uses the SDH track, or a copy of Regular when no SDH track exists. Forced uses the forced track or remains empty. Container default/enabled flags do not choose or classify these tracks. Embedded and adjacent text tracks form one inventory; a missing extraction does not exclude an embedded track. External files are resolved during scanning, so playback does not download missing sidecars.
+
+The Forced option for the first language in priority order is the group's default and autoselect option. Other options are available for manual selection; SDH carries its accessibility characteristics. An empty option still advances alongside A/V with valid, cue-free WebVTT segments. FFmpeg writes the live playlists; Tunarr only enriches the master and repairs FFmpeg 7.1.1's programme-boundary discontinuities, end markers and inherited subtitle URIs.
+
+Each configured language adds three HLS muxers to the programme's FFmpeg process. Each of them receives the full audio and video stream, so that its subtitle segments stay on the video clock, and discards that copy; keep the language list short. A subtitle option that fails to write stops advancing until the next programme and does not interrupt audio and video.
+
+Image subtitles are excluded because they require burn-in. Text formats that the bundled FFmpeg cannot decode, such as TTML and Blu-ray text subtitles, are excluded as well, because a track FFmpeg cannot convert would stop the programme's single output process. Attached cover pictures are excluded from video selection and copying; intentional image inputs such as offline screens remain available.
 
 #### Things to consider
 

@@ -16,15 +16,23 @@ import {
   defaultHlsOptions,
 } from '@/ffmpeg/builder/constants.ts';
 import type { PipelineBuilder } from '@/ffmpeg/builder/pipeline/PipelineBuilder.ts';
+import type { OutputFormat } from '@/ffmpeg/builder/constants.ts';
 import type { PipelineBuilderFactory } from '@/ffmpeg/builder/pipeline/PipelineBuilderFactory.ts';
 import { FrameState } from '@/ffmpeg/builder/state/FrameState.ts';
 import { FfmpegState } from '@/ffmpeg/builder/state/FfmpegState.ts';
 import type { FfmpegInfo, FfmpegVersionResult } from '@/ffmpeg/ffmpegInfo.ts';
 import type { StreamSelector } from '@/ffmpeg/StreamSelector.ts';
 import type { FeatureFlagService } from '@/services/FeatureFlagService.ts';
-import type { StreamDetails, SubtitleStreamDetails } from '@/stream/types.ts';
-import { HttpStreamSource } from '@/stream/types.ts';
+import type {
+  AudioStreamDetails,
+  StreamDetails,
+  SubtitleStreamDetails,
+  DirectSubtitleSlot,
+} from '@/stream/types.ts';
+import { FileStreamSource, HttpStreamSource } from '@/stream/types.ts';
+import type { AudioInputSource } from '@/ffmpeg/builder/input/AudioInputSource.ts';
 import type { SubtitlesInputSource } from '@/ffmpeg/builder/input/SubtitlesInputSource.ts';
+import { EmptyWebVttInputSource } from '@/ffmpeg/builder/input/EmptyWebVttInputSource.ts';
 import type { VideoInputSource } from '@/ffmpeg/builder/input/VideoInputSource.ts';
 import {
   StillImageStream,
@@ -33,11 +41,19 @@ import {
 import { InfiniteLoopInputOption } from '@/ffmpeg/builder/options/input/InfiniteLoopInputOption.ts';
 import dayjs from 'dayjs';
 import duration from 'dayjs/plugin/duration.js';
-import { describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
+import type { DirectSubtitleRendition } from './DirectSubtitleRenditions.ts';
+import { collectDirectSubtitleRenditions } from './DirectSubtitleRenditions.ts';
+import { createDirectSubtitleSlots } from './DirectSubtitleSlots.ts';
 import { FfmpegStreamFactory } from './FfmpegStreamFactory.ts';
+import { resolveAudioAction } from './StreamSelectionEvaluator.ts';
 
 vi.mock('@/util/serverUtil.ts', () => ({
   makeLocalUrl: (path: string) => `http://localhost:8000${path}`,
+}));
+vi.mock('./DirectSubtitleRenditions.ts', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  collectDirectSubtitleRenditions: vi.fn().mockResolvedValue([]),
 }));
 
 dayjs.extend(duration);
@@ -185,20 +201,20 @@ function createCapturingPipelineBuilderFactory(): {
   getCapturedHwAccel: () => string | undefined;
   getCapturedSubtitleInput: () => SubtitlesInputSource | null | undefined;
   getCapturedVideoInput: () => VideoInputSource | undefined;
+  getCapturedAudioInput: () => AudioInputSource | null | undefined;
+  getCapturedAdditionalSubtitleInputs: () => SubtitlesInputSource[];
 } {
   let capturedFrameState: FrameState | undefined;
   let capturedFfmpegState: FfmpegState | undefined;
   let capturedHwAccel: string | undefined;
   let capturedSubtitleInput: SubtitlesInputSource | null | undefined;
   let capturedVideoInput: VideoInputSource | undefined;
+  let capturedAudioInput: AudioInputSource | null | undefined;
+  let capturedAdditionalSubtitleInputs: SubtitlesInputSource[] = [];
 
   const factory: PipelineBuilderFactory = () => {
     const builderProxy: Record<string, unknown> = {};
-    for (const method of [
-      'setAudioInputSource',
-      'setWatermarkInputSource',
-      'setConcatInputSource',
-    ]) {
+    for (const method of ['setWatermarkInputSource', 'setConcatInputSource']) {
       builderProxy[method] = vi.fn().mockReturnValue(builderProxy);
     }
 
@@ -207,9 +223,22 @@ function createCapturingPipelineBuilderFactory(): {
       return builderProxy;
     });
 
+    builderProxy.setAudioInputSource = vi.fn(
+      (input: AudioInputSource | null) => {
+        capturedAudioInput = input;
+        return builderProxy;
+      },
+    );
+
     builderProxy.setSubtitleInputSource = vi.fn(
       (input: SubtitlesInputSource | null) => {
         capturedSubtitleInput = input;
+        return builderProxy;
+      },
+    );
+    builderProxy.setAdditionalSubtitleInputSources = vi.fn(
+      (inputs: SubtitlesInputSource[]) => {
+        capturedAdditionalSubtitleInputs = inputs;
         return builderProxy;
       },
     );
@@ -243,6 +272,8 @@ function createCapturingPipelineBuilderFactory(): {
     getCapturedHwAccel: () => capturedHwAccel,
     getCapturedSubtitleInput: () => capturedSubtitleInput,
     getCapturedVideoInput: () => capturedVideoInput,
+    getCapturedAudioInput: () => capturedAudioInput,
+    getCapturedAdditionalSubtitleInputs: () => capturedAdditionalSubtitleInputs,
   };
 }
 
@@ -280,8 +311,19 @@ function makeMockFeatureFlagService(
 
 function makeMockStreamSelector(
   subtitleStream: SubtitleStreamDetails | null = null,
+  audioStream?: AudioStreamDetails,
 ): StreamSelector {
   return {
+    selectAudioStream: vi
+      .fn()
+      .mockImplementation(
+        async (request: Parameters<StreamSelector['selectAudioStream']>[0]) =>
+          audioStream ??
+          resolveAudioAction(
+            { type: 'by_language', languages: ['eng'] },
+            request.audioStreams,
+          ),
+      ),
     selectAudioAndSubtitleStreams: vi.fn().mockImplementation(async () => ({
       audioStream: { index: 1, codec: 'aac', channels: 2 },
       subtitleStream,
@@ -290,6 +332,11 @@ function makeMockStreamSelector(
 }
 
 describe('FfmpegStreamFactory', () => {
+  beforeEach(() => {
+    vi.mocked(collectDirectSubtitleRenditions)
+      .mockReset()
+      .mockResolvedValue([]);
+  });
   describe('videoPreset wiring into FrameState', () => {
     test('createStreamSession passes videoPreset=veryfast for software h264', async () => {
       const config = makeTranscodeConfig({
@@ -526,6 +573,7 @@ describe('FfmpegStreamFactory', () => {
     function createPassthroughSut(
       configOverrides: Partial<TranscodeConfigOrm> = {},
       streamDetails?: StreamDetails,
+      selectedAudio?: AudioStreamDetails,
     ) {
       const config = makeTranscodeConfig(configOverrides);
       const capturing = createCapturingPipelineBuilderFactory();
@@ -536,7 +584,7 @@ describe('FfmpegStreamFactory', () => {
         capturing.factory,
         makeMockChannelDB(),
         makeMockFeatureFlagService(),
-        makeMockStreamSelector(),
+        makeMockStreamSelector(null, selectedAudio),
         config,
         makeChannel(),
       );
@@ -651,7 +699,7 @@ describe('FfmpegStreamFactory', () => {
       expect(getCapturedHwAccel()).toBe('none');
     });
 
-    test('passthrough sets copyAllStreams and zeroes threadCount in FfmpegState', async () => {
+    test('Direct v2 uses selected stream copy and zeroes threadCount in FfmpegState', async () => {
       const { sut, getCapturedFfmpegState, streamDetails } =
         createPassthroughSut({ threadCount: 4 });
 
@@ -672,7 +720,8 @@ describe('FfmpegStreamFactory', () => {
       });
 
       const ffmpegState = getCapturedFfmpegState()!;
-      expect(ffmpegState.copyAllStreams).toBe(true);
+      expect(ffmpegState.copyAllStreams).toBe(false);
+      expect(ffmpegState.hlsDirectStreamCopy).toEqual({ audioInputIndex: 1 });
       expect(ffmpegState.threadCount).toBe(0);
       expect(ffmpegState.vaapiDevice).toBeNull();
       expect(ffmpegState.vaapiDriver).toBeNull();
@@ -681,7 +730,7 @@ describe('FfmpegStreamFactory', () => {
       expect(ffmpegState.softwareScalingAlgorithm).toBe('fast_bilinear');
     });
 
-    test('passthrough builds audio codec overrides for DTS/TrueHD', async () => {
+    test('explicit remux retains all-audio codec override ordinals', async () => {
       const details = makeStreamDetails();
       details.audioDetails = [
         { codec: AudioFormats.Aac, channels: 2, index: 1 },
@@ -699,7 +748,8 @@ describe('FfmpegStreamFactory', () => {
         options: {
           startTime: dayjs.duration(0),
           duration: dayjs.duration({ seconds: 30 }),
-          outputFormat: hlsDirectV2Format,
+          outputFormat: MpegTsOutputFormat,
+          encoding: { mode: 'remux' },
           ptsOffset: 0,
           realtime: true,
           streamMode: 'hls',
@@ -712,6 +762,104 @@ describe('FfmpegStreamFactory', () => {
         { outputIndex: 1, codec: AudioFormats.Ac3 },
         { outputIndex: 2, codec: AudioFormats.Ac3 },
       ]);
+      expect(ffmpegState.copyAllStreams).toBe(true);
+      expect(ffmpegState.hlsDirectStreamCopy).toBeUndefined();
+    });
+
+    test.each([AudioFormats.Dca, AudioFormats.TrueHd])(
+      'Direct v2 applies the selected %s override to audio output zero',
+      async (codec) => {
+        const details = makeStreamDetails();
+        const selectedAudio = {
+          codec,
+          channels: 6,
+          index: 3,
+          languageCodeISO6392: 'eng',
+        };
+        details.audioDetails = [
+          {
+            codec: AudioFormats.Aac,
+            channels: 2,
+            index: 1,
+            languageCodeISO6392: 'jpn',
+          },
+          selectedAudio,
+        ];
+        const { sut, getCapturedFfmpegState } = createPassthroughSut(
+          {},
+          details,
+          selectedAudio,
+        );
+        const result = await sut.createStreamSession({
+          stream: { source: new FileStreamSource('/media/input.mkv'), details },
+          options: {
+            startTime: dayjs.duration(0),
+            duration: details.duration,
+            outputFormat: hlsDirectV2Format,
+            ptsOffset: 0,
+            realtime: true,
+            streamMode: 'hls_direct_v2',
+          },
+          lineupItem: makeLineupItem(),
+        });
+        expect(getCapturedFfmpegState()?.hlsDirectStreamCopy).toEqual({
+          audioInputIndex: 3,
+        });
+        expect(getCapturedFfmpegState()?.audioCodecOverrides).toEqual([
+          { outputIndex: 0, codec: AudioFormats.Ac3 },
+        ]);
+        expect(result?.renditions.audio).toHaveLength(1);
+        expect(result?.renditions.audio[0]?.language).toBe('eng');
+      },
+    );
+
+    test('Direct v2 does not encode an incompatible unselected audio track', async () => {
+      const details = makeStreamDetails();
+      details.audioDetails = [
+        { codec: AudioFormats.TrueHd, index: 1, languageCodeISO6392: 'jpn' },
+        { codec: AudioFormats.Aac, index: 19, languageCodeISO6392: 'eng' },
+      ];
+      const { sut, getCapturedFfmpegState } = createPassthroughSut({}, details);
+      await sut.createStreamSession({
+        stream: { source: new FileStreamSource('/media/input.mkv'), details },
+        options: {
+          startTime: dayjs.duration(0),
+          duration: details.duration,
+          outputFormat: hlsDirectV2Format,
+          ptsOffset: 0,
+          realtime: true,
+          streamMode: 'hls_direct_v2',
+        },
+        lineupItem: makeLineupItem(),
+      });
+      expect(getCapturedFfmpegState()?.hlsDirectStreamCopy).toEqual({
+        audioInputIndex: 19,
+      });
+      expect(getCapturedFfmpegState()?.audioCodecOverrides).toEqual([]);
+    });
+
+    test('Direct v2 retains the existing absence of audio for an audio-less source', async () => {
+      const details = makeStreamDetails();
+      details.audioDetails = undefined;
+      const { sut, getCapturedFfmpegState } = createPassthroughSut({}, details);
+      const result = await sut.createStreamSession({
+        stream: { source: new FileStreamSource('/media/input.mkv'), details },
+        options: {
+          startTime: dayjs.duration(0),
+          duration: details.duration,
+          outputFormat: hlsDirectV2Format,
+          ptsOffset: 0,
+          realtime: true,
+          streamMode: 'hls_direct_v2',
+        },
+        lineupItem: makeLineupItem(),
+      });
+      expect(getCapturedFfmpegState()?.hlsDirectStreamCopy).toBeDefined();
+      expect(
+        getCapturedFfmpegState()?.hlsDirectStreamCopy?.audioInputIndex,
+      ).toBeUndefined();
+      expect(getCapturedFfmpegState()?.audioCodecOverrides).toEqual([]);
+      expect(result?.renditions.audio).toEqual([]);
     });
 
     test('passthrough uses source video dimensions for FrameState sizes', async () => {
@@ -811,7 +959,7 @@ describe('FfmpegStreamFactory', () => {
       expect(result?.renditions.audio).toEqual([]);
     });
 
-    test('passthrough mode advertises every source audio track', async () => {
+    test('Direct v2 advertises only the selected source audio track', async () => {
       const result = await makeSut().createStreamSession({
         stream: {
           source: new HttpStreamSource('http://example.com/video.ts'),
@@ -824,6 +972,27 @@ describe('FfmpegStreamFactory', () => {
           ptsOffset: 0,
           realtime: true,
           streamMode: 'hls_direct_v2',
+        },
+        lineupItem: makeLineupItem(),
+      });
+
+      expect(result?.renditions.audio.map((r) => r.language)).toEqual(['eng']);
+    });
+
+    test('explicit remux advertises every source audio track', async () => {
+      const result = await makeSut().createStreamSession({
+        stream: {
+          source: new HttpStreamSource('http://example.com/video.ts'),
+          details: makeMultiAudioStreamDetails(),
+        },
+        options: {
+          startTime: dayjs.duration(0),
+          duration: dayjs.duration({ seconds: 30 }),
+          outputFormat: MpegTsOutputFormat,
+          encoding: { mode: 'remux' },
+          ptsOffset: 0,
+          realtime: true,
+          streamMode: 'hls',
         },
         lineupItem: makeLineupItem(),
       });
@@ -890,6 +1059,43 @@ describe('FfmpegStreamFactory', () => {
       expect(videoInput?.source).toBe(placeholder);
       expect(videoInput?.streams[0]).toBeInstanceOf(StillImageStream);
       expect(videoInput?.hasInputOption(InfiniteLoopInputOption)).toBe(true);
+    });
+
+    test('Direct v2 encodes the placeholder and adds the track as its own audio input', async () => {
+      const {
+        factory,
+        getCapturedVideoInput,
+        getCapturedAudioInput,
+        getCapturedFfmpegState,
+      } = createCapturingPipelineBuilderFactory();
+      const placeholder = new HttpStreamSource(
+        'http://localhost:8000/images/generic-music-screen.png',
+      );
+      const track = new HttpStreamSource('http://example.com/track.flac');
+
+      const result = await makeSut(factory).createStreamSession({
+        stream: {
+          source: track,
+          details: makeAudioOnlyStreamDetails(placeholder),
+        },
+        options: {
+          ...options,
+          outputFormat: HlsDirectOutputFormat(defaultHlsOptions),
+          streamMode: 'hls_direct_v2',
+        },
+        lineupItem: makeLineupItem(),
+      });
+
+      expect(result).not.toBeNull();
+      // The placeholder is input 0 and must be encoded; the media file is a
+      // separate audio input. A copy mapping of `0:V:0` plus `0:<index>`
+      // against the image would match no audio stream at all.
+      expect(getCapturedVideoInput()?.source).toBe(placeholder);
+      expect(getCapturedAudioInput()?.source).toBe(track);
+      const state = getCapturedFfmpegState();
+      expect(state?.outputFormat.type).toBe('hls_direct_v2');
+      expect(state?.hlsDirectStreamCopy).toBeUndefined();
+      expect(state?.copyAllStreams).toBe(false);
     });
 
     test('rejects an audio-only stream without a placeholder image', async () => {
@@ -1247,167 +1453,450 @@ describe('FfmpegStreamFactory', () => {
       });
     });
 
-    describe('passthrough mode (remux / HlsDirectV2)', () => {
+    describe('Direct v2 fixed channel subtitle slots', () => {
       const hlsDirectV2Format = HlsDirectOutputFormat(defaultHlsOptions);
+      const englishSlots = createDirectSubtitleSlots(['eng']);
+      const localTextSubtitle: SubtitleStreamDetails = {
+        ...textSubtitleStream,
+        type: 'external',
+        path: '/media/input.eng.srt',
+      };
 
-      test('uses sidecar (Convert) for text-based subtitles', async () => {
-        const config = makeTranscodeConfig();
+      function available(
+        source: SubtitleStreamDetails,
+      ): DirectSubtitleRendition {
+        if (source.type === 'embedded' && source.path === undefined) {
+          if (source.index === undefined)
+            throw new Error('Embedded fixture requires an index');
+          return {
+            source,
+            stream: {
+              ...source,
+              type: 'embedded',
+              index: source.index,
+              path: undefined,
+            },
+          };
+        }
+        if (source.path === undefined)
+          throw new Error('Fixture requires a local path');
+        return {
+          source,
+          stream: { ...source, type: 'external', index: 0, path: source.path },
+        };
+      }
+
+      async function directSession(
+        options: {
+          source?: FileStreamSource | HttpStreamSource;
+          subtitle?: SubtitleStreamDetails;
+          subtitles?: StreamDetails['subtitleDetails'];
+          available?: DirectSubtitleRendition[];
+          slots?: readonly DirectSubtitleSlot[];
+          noPlan?: boolean;
+          hlsDirectBitrate?: number;
+          outputFormat?: OutputFormat;
+          remux?: boolean;
+          noSubtitle?: boolean;
+          subtitlesEnabled?: boolean;
+          sidecarEnabled?: boolean;
+          audioDetails?: StreamDetails['audioDetails'];
+        } = {},
+      ) {
+        const info = makeMockFfmpegInfo();
         const capturing = createCapturingPipelineBuilderFactory();
         const details = makeStreamDetails();
-        details.subtitleDetails = [textSubtitleStream];
-
+        details.hlsDirectBitrate = options.hlsDirectBitrate;
+        if (options.audioDetails !== undefined)
+          details.audioDetails = options.audioDetails;
+        const subtitle = options.subtitle ?? localTextSubtitle;
+        details.subtitleDetails = options.noSubtitle
+          ? undefined
+          : (options.subtitles ?? [subtitle]);
+        vi.mocked(collectDirectSubtitleRenditions).mockResolvedValue(
+          options.available ??
+            (options.noSubtitle ? [] : [available(subtitle)]),
+        );
+        const channelDB = makeMockChannelDB();
+        const selector = makeMockStreamSelector(
+          options.noSubtitle ? null : subtitle,
+        );
         const sut = new FfmpegStreamFactory(
-          makeMockFfmpegInfo(),
+          info,
           makeMockSettingsDB(makeFfmpegSettings()),
           capturing.factory,
-          makeMockChannelDB(),
-          makeMockFeatureFlagService(),
-          makeMockStreamSelector(),
-          config,
-          makeChannel({ subtitlesEnabled: true }),
+          channelDB,
+          makeMockFeatureFlagService({
+            webvttSidecarEnabled: options.sidecarEnabled ?? true,
+          }),
+          selector,
+          makeTranscodeConfig(),
+          makeChannel({ subtitlesEnabled: options.subtitlesEnabled ?? true }),
         );
-
         const result = await sut.createStreamSession({
           stream: {
-            source: new HttpStreamSource('http://example.com/video.ts'),
+            source: options.source ?? new FileStreamSource('/media/input.mkv'),
             details,
           },
           options: {
             startTime: dayjs.duration(0),
             duration: dayjs.duration({ seconds: 30 }),
-            outputFormat: hlsDirectV2Format,
+            outputFormat: options.outputFormat ?? hlsDirectV2Format,
+            encoding: options.remux ? { mode: 'remux' } : undefined,
+            directSubtitleSlots: options.noPlan
+              ? undefined
+              : (options.slots ?? englishSlots),
             ptsOffset: 0,
             realtime: true,
             streamMode: 'hls',
           },
           lineupItem: makeLineupItem(),
         });
+        return { info, capturing, result, channelDB, selector, details };
+      }
 
-        const subtitleInput = capturing.getCapturedSubtitleInput();
-        expect(subtitleInput).not.toBeNull();
-        expect(subtitleInput!.method).toBe(SubtitleMethods.Convert);
-        expect(result!.renditions.subtitle).toEqual({
-          language: 'eng',
-          languageName: 'English',
+      test('fills regular and SDH from one plain input while the forced slot stays empty', async () => {
+        const { capturing, result, selector, details } = await directSession({
+          audioDetails: [
+            { index: 1, codec: 'truehd', languageCodeISO6392: 'jpn' },
+            { index: 19, codec: 'aac', languageCodeISO6392: 'eng' },
+          ],
+        });
+        const inputs = capturing.getCapturedAdditionalSubtitleInputs();
+        expect(inputs).toHaveLength(2);
+        expect(inputs[0]?.path).toBe('/media/input.eng.srt');
+        expect(inputs[0]?.streams[0]?.index).toBe(0);
+        expect(inputs[1]).toBeInstanceOf(EmptyWebVttInputSource);
+        expect(capturing.getCapturedFfmpegState()?.hlsDirectSubtitles).toEqual([
+          {
+            id: 'eng_regular',
+            language: 'eng',
+            default: false,
+            subtitleOutputIndex: 0,
+          },
+          {
+            id: 'eng_sdh',
+            language: 'eng',
+            default: false,
+            subtitleOutputIndex: 0,
+          },
+          {
+            id: 'eng_forced',
+            language: 'eng',
+            default: true,
+            subtitleOutputIndex: 1,
+          },
+        ]);
+        expect(result?.renditions.subtitles).toEqual(englishSlots);
+        expect(capturing.getCapturedSubtitleInput()).toBeNull();
+        expect(capturing.getCapturedFfmpegState()?.hlsDirectStreamCopy).toEqual(
+          { audioInputIndex: 19 },
+        );
+        expect(capturing.getCapturedFfmpegState()?.audioCodecOverrides).toEqual(
+          [],
+        );
+        expect(result?.renditions.audio).toHaveLength(1);
+        expect(result?.renditions.audio[0]?.language).toBe('eng');
+        expect(result?.renditions.subtitle).toBeUndefined();
+        expect(collectDirectSubtitleRenditions).toHaveBeenCalledWith({
+          lineupItem: makeLineupItem(),
+          subtitleStreams: details.subtitleDetails,
+        });
+        expect(selector.selectAudioAndSubtitleStreams).not.toHaveBeenCalled();
+      });
+
+      test.each([
+        new FileStreamSource('/media/input.mkv'),
+        new HttpStreamSource('http://media.test/input.mkv', {
+          'X-Emby-Token': 'fixture-token',
+        }),
+      ])(
+        'fills slots from embedded, cached and external text collectively with %o media',
+        async (source) => {
+          const embedded = { ...textSubtitleStream, index: 17, default: false };
+          const sdh = { ...localTextSubtitle, sdh: true };
+          const cachedForced = {
+            ...textSubtitleStream,
+            index: 23,
+            path: '/cache/forced.srt',
+            forced: true,
+          };
+          const { capturing, result } = await directSession({
+            source,
+            subtitles: [embedded, sdh, cachedForced],
+            available: [
+              available(embedded),
+              available(sdh),
+              available(cachedForced),
+            ],
+          });
+          const inputs = capturing.getCapturedAdditionalSubtitleInputs();
+          expect(inputs.map((input) => input.path)).toEqual([
+            source.path,
+            '/media/input.eng.srt',
+            '/cache/forced.srt',
+          ]);
+          expect(inputs.map((input) => input.streams[0]?.index)).toEqual([
+            17, 0, 0,
+          ]);
+          expect(inputs.map((input) => input.streams[0]?.inputKind)).toEqual([
+            'embedded',
+            'external',
+            'external',
+          ]);
+          expect(
+            capturing
+              .getCapturedFfmpegState()
+              ?.hlsDirectSubtitles?.map(
+                ({ subtitleOutputIndex }) => subtitleOutputIndex,
+              ),
+          ).toEqual([0, 1, 2]);
+          expect(result?.renditions.subtitles).toEqual(englishSlots);
+        },
+      );
+
+      test('keeps the same catalogue across storage, title, default and availability changes', async () => {
+        const first = await directSession();
+        const next = await directSession({
+          source: new HttpStreamSource('http://media.test/next.mkv'),
+          subtitle: {
+            ...textSubtitleStream,
+            index: 23,
+            title: 'Different programme title',
+            sdh: true,
+            default: false,
+          },
+        });
+        const empty = await directSession({ noSubtitle: true });
+        expect(first.result?.renditions.subtitles).toEqual(englishSlots);
+        expect(next.result?.renditions.subtitles).toEqual(englishSlots);
+        expect(empty.result?.renditions.subtitles).toEqual(englishSlots);
+        expect(
+          next.capturing
+            .getCapturedFfmpegState()
+            ?.hlsDirectSubtitles?.map(
+              ({ subtitleOutputIndex }) => subtitleOutputIndex,
+            ),
+        ).toEqual([0, 0, 1]);
+        expect(
+          empty.capturing.getCapturedAdditionalSubtitleInputs(),
+        ).toHaveLength(1);
+        expect(
+          empty.capturing.getCapturedAdditionalSubtitleInputs()[0],
+        ).toBeInstanceOf(EmptyWebVttInputSource);
+        expect(
+          empty.capturing
+            .getCapturedFfmpegState()
+            ?.hlsDirectSubtitles?.map(
+              ({ subtitleOutputIndex }) => subtitleOutputIndex,
+            ),
+        ).toEqual([0, 0, 0]);
+      });
+
+      test('takes the first path-ordered sidecar despite database order and a default alternative', async () => {
+        const first = { ...localTextSubtitle, default: false };
+        const second = {
+          ...localTextSubtitle,
+          path: '/media/later-default.vtt',
+          codec: 'webvtt',
           default: true,
-          forced: false,
-          title: 'English SRT',
+        };
+        const { capturing } = await directSession({
+          available: [available(second), available(first)],
         });
+        expect(capturing.getCapturedAdditionalSubtitleInputs()[0]?.path).toBe(
+          first.path,
+        );
       });
 
-      test('skips image-based subtitles (cannot sidecar or burn)', async () => {
-        const config = makeTranscodeConfig();
-        const capturing = createCapturingPipelineBuilderFactory();
-        const details = makeStreamDetails();
-        details.subtitleDetails = [imageSubtitleStream];
-
-        const sut = new FfmpegStreamFactory(
-          makeMockFfmpegInfo(),
-          makeMockSettingsDB(makeFfmpegSettings()),
-          capturing.factory,
-          makeMockChannelDB(),
-          makeMockFeatureFlagService(),
-          makeMockStreamSelector(),
-          config,
-          makeChannel({ subtitlesEnabled: true }),
+      test('keeps same-file regular and forced candidates eligible while reusing one encoded input', async () => {
+        const forced = { ...localTextSubtitle, forced: true };
+        const { capturing, result } = await directSession({
+          available: [available(forced), available(localTextSubtitle)],
+        });
+        expect(capturing.getCapturedAdditionalSubtitleInputs()).toHaveLength(1);
+        expect(capturing.getCapturedAdditionalSubtitleInputs()[0]?.path).toBe(
+          localTextSubtitle.path,
         );
+        expect(
+          capturing
+            .getCapturedFfmpegState()
+            ?.hlsDirectSubtitles?.map(
+              ({ subtitleOutputIndex }) => subtitleOutputIndex,
+            ),
+        ).toEqual([0, 0, 0]);
+        expect(result?.renditions.subtitles).toEqual(englishSlots);
+      });
 
-        const result = await sut.createStreamSession({
-          stream: {
-            source: new HttpStreamSource('http://example.com/video.ts'),
-            details,
-          },
-          options: {
-            startTime: dayjs.duration(0),
+      test.each([
+        { noSubtitle: true },
+        {
+          subtitles: [imageSubtitleStream] as StreamDetails['subtitleDetails'],
+          available: [],
+        },
+      ])(
+        'retains all configured slots with empty input when usable text is absent: %o',
+        async (options) => {
+          const { capturing, result } = await directSession(options);
+          expect(capturing.getCapturedAdditionalSubtitleInputs()).toHaveLength(
+            1,
+          );
+          expect(
+            capturing.getCapturedAdditionalSubtitleInputs()[0],
+          ).toBeInstanceOf(EmptyWebVttInputSource);
+          expect(result?.renditions.subtitles).toEqual(englishSlots);
+          expect(result?.renditions.nativeSubtitleOutput).toBe(true);
+        },
+      );
+
+      test.each([{ subtitlesEnabled: false }, { sidecarEnabled: false }])(
+        'honors the frozen tuned-channel plan despite another factory channel gate: %o',
+        async (options) => {
+          const { capturing, result, channelDB } = await directSession(options);
+          expect(collectDirectSubtitleRenditions).toHaveBeenCalledOnce();
+          expect(
+            channelDB.getChannelSubtitlePreferences,
+          ).not.toHaveBeenCalled();
+          expect(capturing.getCapturedAdditionalSubtitleInputs()).toHaveLength(
+            2,
+          );
+          expect(result?.renditions.subtitles).toEqual(englishSlots);
+        },
+      );
+
+      test.each([{ slots: [] }, { noPlan: true }])(
+        'does not invent a catalogue when the supplied plan is empty or absent: %o',
+        async (options) => {
+          const { capturing, result, channelDB } = await directSession(options);
+          expect(collectDirectSubtitleRenditions).not.toHaveBeenCalled();
+          expect(
+            channelDB.getChannelSubtitlePreferences,
+          ).not.toHaveBeenCalled();
+          expect(capturing.getCapturedAdditionalSubtitleInputs()).toEqual([]);
+          expect(result?.renditions.subtitles).toEqual([]);
+        },
+      );
+
+      test.each(['error', 'offline'] as const)(
+        'preserves tuned-channel slots through an encoded %s placeholder on a subtitle-disabled target',
+        async (kind) => {
+          const capturing = createCapturingPipelineBuilderFactory();
+          const sut = new FfmpegStreamFactory(
+            makeMockFfmpegInfo(),
+            makeMockSettingsDB(makeFfmpegSettings()),
+            capturing.factory,
+            makeMockChannelDB(),
+            makeMockFeatureFlagService({ webvttSidecarEnabled: false }),
+            makeMockStreamSelector(),
+            makeTranscodeConfig(),
+            makeChannel({ subtitlesEnabled: false }),
+          );
+          const common = {
             duration: dayjs.duration({ seconds: 30 }),
             outputFormat: hlsDirectV2Format,
-            ptsOffset: 0,
-            realtime: true,
-            streamMode: 'hls',
-          },
-          lineupItem: makeLineupItem(),
-        });
+            directSubtitleSlots: englishSlots,
+          };
+          const result = await sut.createPlaceholderSession(
+            kind === 'error'
+              ? { ...common, kind, title: 'Fixture error' }
+              : { ...common, kind },
+          );
+          expect(result?.renditions.subtitles).toEqual(englishSlots);
+          expect(capturing.getCapturedAdditionalSubtitleInputs()).toHaveLength(
+            1,
+          );
+          expect(
+            capturing.getCapturedAdditionalSubtitleInputs()[0],
+          ).toBeInstanceOf(EmptyWebVttInputSource);
+          expect(
+            capturing
+              .getCapturedFfmpegState()
+              ?.hlsDirectSubtitles?.map(
+                ({ subtitleOutputIndex }) => subtitleOutputIndex,
+              ),
+          ).toEqual([0, 0, 0]);
+        },
+      );
 
-        const subtitleInput = capturing.getCapturedSubtitleInput();
-        expect(subtitleInput).toBeNull();
-        expect(result!.renditions.subtitle).toBeUndefined();
+      test('carries the evaluated bitrate into Direct v2 state in bits per second', async () => {
+        expect(
+          (
+            await directSession({ hlsDirectBitrate: 1_234_567 })
+          ).capturing.getCapturedFfmpegState()?.hlsDirectBitrate,
+        ).toBe(1_234_567);
       });
 
-      test('skips subtitles when channel.subtitlesEnabled is false', async () => {
-        const config = makeTranscodeConfig();
-        const capturing = createCapturingPipelineBuilderFactory();
-        const details = makeStreamDetails();
-        details.subtitleDetails = [textSubtitleStream];
-
-        const sut = new FfmpegStreamFactory(
-          makeMockFfmpegInfo(),
-          makeMockSettingsDB(makeFfmpegSettings()),
-          capturing.factory,
-          makeMockChannelDB(),
-          makeMockFeatureFlagService(),
-          makeMockStreamSelector(),
-          config,
-          makeChannel({ subtitlesEnabled: false }),
-        );
-
-        const result = await sut.createStreamSession({
-          stream: {
-            source: new HttpStreamSource('http://example.com/video.ts'),
-            details,
-          },
-          options: {
-            startTime: dayjs.duration(0),
-            duration: dayjs.duration({ seconds: 30 }),
-            outputFormat: hlsDirectV2Format,
-            ptsOffset: 0,
-            realtime: true,
-            streamMode: 'hls',
-          },
-          lineupItem: makeLineupItem(),
+      test('does not carry the Direct v2 estimate into explicit remux state', async () => {
+        const { capturing } = await directSession({
+          hlsDirectBitrate: 1_234_567,
+          remux: true,
+          outputFormat: { type: 'mpegts' },
         });
-
-        const subtitleInput = capturing.getCapturedSubtitleInput();
-        expect(subtitleInput).toBeNull();
-        expect(result!.renditions.subtitle).toBeUndefined();
+        expect(
+          capturing.getCapturedFfmpegState()?.hlsDirectBitrate,
+        ).toBeUndefined();
       });
 
-      test('skips subtitles when no subtitle details in stream', async () => {
-        const config = makeTranscodeConfig();
-        const capturing = createCapturingPipelineBuilderFactory();
-        const details = makeStreamDetails();
-        // No subtitleDetails set
+      test.each([
+        { outputFormat: { type: 'mpegts' as const }, remux: true },
+        { outputFormat: HlsOutputFormat(defaultHlsOptions), remux: false },
+      ])(
+        'retains singular subtitle metadata and input in other modes: %o',
+        async (options) => {
+          const { capturing, result } = await directSession(options);
+          const subtitleInput = capturing.getCapturedSubtitleInput();
+          expect(subtitleInput).not.toBeNull();
+          expect(subtitleInput?.method).toBe(SubtitleMethods.Convert);
+          expect(collectDirectSubtitleRenditions).not.toHaveBeenCalled();
+          expect(capturing.getCapturedAdditionalSubtitleInputs()).toEqual([]);
+          expect(
+            capturing.getCapturedFfmpegState()?.hlsDirectSubtitles,
+          ).toBeUndefined();
+          expect(result?.renditions.subtitles).toBeUndefined();
+          expect(result?.renditions.subtitle).toEqual({
+            language: 'eng',
+            languageName: 'English',
+            default: true,
+            forced: false,
+            title: 'English SRT',
+          });
+        },
+      );
 
-        const sut = new FfmpegStreamFactory(
-          makeMockFfmpegInfo(),
-          makeMockSettingsDB(makeFfmpegSettings()),
-          capturing.factory,
-          makeMockChannelDB(),
-          makeMockFeatureFlagService(),
-          makeMockStreamSelector(),
-          config,
-          makeChannel({ subtitlesEnabled: true }),
-        );
+      test.each([
+        { subtitle: imageSubtitleStream },
+        { subtitlesEnabled: false },
+      ])(
+        'explicit remux excludes image subtitles and honors the channel subtitle gate: %o',
+        async (options) => {
+          const { capturing, result } = await directSession({
+            ...options,
+            outputFormat: MpegTsOutputFormat,
+            remux: true,
+          });
+          expect(capturing.getCapturedSubtitleInput()).toBeNull();
+          expect(capturing.getCapturedAdditionalSubtitleInputs()).toEqual([]);
+          expect(result?.renditions.subtitle).toBeUndefined();
+          expect(result?.renditions.subtitles).toBeUndefined();
+        },
+      );
 
-        const result = await sut.createStreamSession({
-          stream: {
-            source: new HttpStreamSource('http://example.com/video.ts'),
-            details,
-          },
-          options: {
-            startTime: dayjs.duration(0),
-            duration: dayjs.duration({ seconds: 30 }),
-            outputFormat: hlsDirectV2Format,
-            ptsOffset: 0,
-            realtime: true,
-            streamMode: 'hls',
-          },
-          lineupItem: makeLineupItem(),
-        });
-
-        const subtitleInput = capturing.getCapturedSubtitleInput();
-        expect(subtitleInput).toBeNull();
-        expect(result!.renditions.subtitle).toBeUndefined();
-      });
+      test.each([
+        { outputFormat: { type: 'mpegts' as const }, remux: true },
+        { outputFormat: HlsOutputFormat(defaultHlsOptions), remux: false },
+      ])(
+        'does not add a subtitle producer to another mode without text: %o',
+        async (options) => {
+          const { capturing, result } = await directSession({
+            ...options,
+            noSubtitle: true,
+          });
+          expect(capturing.getCapturedSubtitleInput()).toBeNull();
+          expect(capturing.getCapturedAdditionalSubtitleInputs()).toEqual([]);
+          expect(result?.renditions.subtitle).toBeUndefined();
+          expect(result?.renditions.subtitles).toBeUndefined();
+        },
+      );
     });
   });
 });

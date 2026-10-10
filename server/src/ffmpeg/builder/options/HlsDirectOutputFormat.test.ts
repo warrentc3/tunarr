@@ -14,6 +14,17 @@ function makeFormat(
 }
 
 describe('HlsDirectOutputFormat', () => {
+  test.each([true, false])(
+    'does not date programme segments from the producer clock (first=%s)',
+    (isFirst) => {
+      const opts = makeFormat(isFirst).options();
+      const flags = opts[opts.indexOf('-hls_flags') + 1].split('+');
+      expect(flags).not.toContain('program_date_time');
+      expect(flags).toContain('append_list');
+      expect(flags.includes('discont_start')).toBe(!isFirst);
+    },
+  );
+
   test('includes -master_pl_name playlist.m3u8 for first transcode', () => {
     const opts = makeFormat(true).options();
     const idx = opts.indexOf('-master_pl_name');

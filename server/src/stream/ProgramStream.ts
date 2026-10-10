@@ -1,6 +1,9 @@
 import type { ISettingsDB } from '@/db/interfaces/ISettingsDB.js';
 import type { FfmpegTranscodeSession } from '@/ffmpeg/FfmpegTrancodeSession.js';
-import type { OutputFormat } from '@/ffmpeg/builder/constants.js';
+import {
+  OutputFormatTypes,
+  type OutputFormat,
+} from '@/ffmpeg/builder/constants.js';
 import type { TranscodeSessionResult } from '@/ffmpeg/types.js';
 import { CacheImageService } from '@/services/cacheImageService.js';
 import { Result } from '@/types/result.js';
@@ -21,7 +24,7 @@ import type {
 } from '../db/derived_types/StreamLineup.ts';
 import { MediaSourceDB } from '../db/mediaSourceDB.ts';
 import type { FFmpegAssistedFactory } from '../ffmpeg/FFmpegModule.ts';
-import type { StreamOptions } from '../ffmpeg/types.ts';
+import type { ProgramStreamOptions } from './ProgramStreamFactory.ts';
 import { KEYS } from '../types/inject.ts';
 import { assisted, injected, multiInjected } from '../util/assistedInject.ts';
 import {
@@ -54,6 +57,8 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
   private hadError: boolean = false;
   private _transcodeSession: Maybe<FfmpegTranscodeSession>;
   private _renditions?: StreamRenditions;
+  private stopped = false;
+  private replacementPending?: Promise<void>;
 
   constructor(
     @injected(KEYS.SettingsDB) protected settingsDB: ISettingsDB,
@@ -67,7 +72,7 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
     private streamPlugins: ProgramStreamPlugin[],
     @assisted public context: PlayerContext,
     @assisted protected outputFormat: OutputFormat,
-    @assisted public opts?: Partial<StreamOptions>,
+    @assisted public opts?: ProgramStreamOptions,
   ) {
     super();
   }
@@ -124,6 +129,7 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
     const streamDetailsResult = await this.programStreamDetails.getStream({
       server,
       lineupItem: lineupItem.program,
+      requireBitrate: this.outputFormat.type === OutputFormatTypes.HlsDirectV2,
     });
 
     if (streamDetailsResult.isFailure()) {
@@ -210,6 +216,7 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
       outputFormat: this.outputFormat,
       ptsOffset: this.opts?.ptsOffset,
       realtime: this.opts?.realtime,
+      directSubtitleSlots: this.opts?.directSubtitleSlots,
     });
 
     if (isUndefined(result)) {
@@ -245,6 +252,7 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
       outputFormat: this.outputFormat,
       realtime: this.opts?.realtime,
       ptsOffset: this.opts?.ptsOffset,
+      directSubtitleSlots: this.opts?.directSubtitleSlots,
     });
 
     if (isUndefined(result)) {
@@ -259,14 +267,43 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
   }
 
   async start(sink?: PassThrough) {
+    if (this.stopped) return;
     if (!this.isInitialized()) {
       await this.setup();
     }
 
-    return (this.outStream = this._transcodeSession?.start(sink));
+    const session = this._transcodeSession;
+    if (!session) return;
+    return (this.outStream = await this.startProducer(session, sink));
+  }
+
+  private async startProducer(
+    session: FfmpegTranscodeSession,
+    sink?: PassThrough,
+  ) {
+    if (this.stopped) return;
+    if (
+      this.opts?.beforeProducerStart &&
+      !(await this.opts.beforeProducerStart(session, this._renditions))
+    )
+      return;
+    // Shutdown can arrive while the checkpoint is reading completed playlists.
+    if (this.stopped) return;
+    return session.start(sink);
+  }
+
+  /** Wait for the entire programme, including its runtime error replacement. */
+  async wait(): Promise<void> {
+    while (this._transcodeSession) {
+      const session = this._transcodeSession;
+      await session.exited;
+      await this.replacementPending;
+      if (session === this._transcodeSession) return;
+    }
   }
 
   shutdown(): void {
+    this.stopped = true;
     if (this.isInitialized()) {
       this.transcodeSession!.kill();
     }
@@ -287,6 +324,7 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
     this._transcodeSession = session;
     this._transcodeSession.on('end', () => this.shutdownInternal());
     this._transcodeSession.on('error', () => {
+      if (this.stopped || this._transcodeSession !== session) return;
       if (this.hadError) {
         // We're streaming the error and something went wrong with that..
         // time to just bail.
@@ -297,17 +335,28 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
         const failedStream = this._transcodeSession;
         failedStream?.kill();
         if (!this.opts?.disableErrorStream) {
-          this.tryReplaceWithErrorStream(this.outStream).catch((e) => {
+          this.replacementPending = this.tryReplaceWithErrorStream(
+            session,
+            this.outStream,
+          ).catch((e) => {
             this.logger.error(e, 'Error while setting up ');
+            if (!this.stopped) this.emit('error');
           });
         }
       }
     });
   }
 
-  private async tryReplaceWithErrorStream(sink?: PassThrough) {
+  private async tryReplaceWithErrorStream(
+    failed: FfmpegTranscodeSession,
+    sink?: PassThrough,
+  ) {
     const out = sink ?? new PassThrough();
     try {
+      // Finalize the failed writer before snapshotting its playlists or
+      // starting another append-mode producer in the same directory.
+      await failed.exited;
+      if (this.stopped) return;
       const errorResult = await this.getErrorStream(this.context);
 
       if (isUndefined(errorResult)) {
@@ -315,8 +364,10 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
         return;
       }
 
-      errorResult.session.start(out);
+      if (this.stopped) return;
       this.transcodeSession = errorResult.session;
+      this._renditions = errorResult.renditions;
+      await this.startProducer(errorResult.session, out);
 
       this.transcodeSession.on('end', () => {
         out.push(null);
@@ -344,6 +395,7 @@ export class ProgramStream extends events.EventEmitter<ProgramStreamEvents> {
       duration,
       outputFormat: this.outputFormat,
       realtime: true,
+      directSubtitleSlots: this.opts?.directSubtitleSlots,
     });
   }
 

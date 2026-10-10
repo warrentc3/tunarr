@@ -27,6 +27,10 @@ class TestHlsSession extends BaseHlsSession {
     return this.minSubtitleSegmentRequested;
   }
 
+  minSubtitleRendition(rendition: string, inactiveAfterMs?: number) {
+    return this.minSubtitleSegmentRequestedFor(rendition, inactiveAfterMs);
+  }
+
   protected getHlsOptions(): DeepRequired<HlsOptions> {
     return {
       hlsDeleteThreshold: 3,
@@ -114,6 +118,40 @@ describe('BaseHlsSession', () => {
   });
 
   describe('_minByIp stale connection cleanup', () => {
+    it('keeps each subtitle rendition floor separate and releases them on disconnect', () => {
+      session.addConnection('client', makeConnection('client'));
+      session.onSegmentRequested('client', 'sub_a12_000050.vtt', 'a12');
+      session.onSegmentRequested('client', 'sub_b34_000005.vtt', 'b34');
+      session.onSegmentRequested('client', 'data000040.ts');
+
+      expect(session.minSubtitleRendition('a12')).toBe(50);
+      expect(session.minSubtitleRendition('b34')).toBe(5);
+      expect(session.minSubtitleRendition('unknown')).toBe(0);
+      expect(session.minSubtitleSegment).toBe(0);
+      expect(session.minSegment).toBe(40);
+      session.removeConnection('client');
+      expect(session.minSubtitleRendition('a12')).toBe(0);
+      expect(session.minSubtitleRendition('b34')).toBe(0);
+    });
+
+    it('releases a rendition floor once its client has moved on without it', () => {
+      session.onSegmentRequested('client', 'sub_a12_000050.vtt', 'a12');
+      vi.advanceTimersByTime(90_000);
+      // A paused client makes no requests at all and keeps its floor, as it
+      // keeps its video floor.
+      expect(session.minSubtitleRendition('a12', 60_000)).toBe(50);
+
+      // Switched renditions: video keeps flowing but a12 is never requested.
+      session.onSegmentRequested('other', 'sub_a12_000070.vtt', 'a12');
+      session.onSegmentRequested('client', 'data000080.ts');
+      expect(session.minSubtitleRendition('a12', 60_000)).toBe(70);
+      expect(session.minSubtitleRendition('a12')).toBe(50);
+
+      // Requests within the bound keep the floor.
+      vi.advanceTimersByTime(30_000);
+      session.onSegmentRequested('other', 'data000081.ts');
+      expect(session.minSubtitleRendition('a12', 60_000)).toBe(70);
+    });
     it('tracks segment numbers per IP when onSegmentRequested is called', () => {
       session.onSegmentRequested('192.168.1.1', 'data000010.ts');
       session.onSegmentRequested('192.168.1.2', 'data000020.ts');
@@ -258,6 +296,7 @@ describe('BaseHlsSession', () => {
       expect(session.minByIp.get('192.168.1.1')).toEqual({
         video: 24,
         subtitle: 5,
+        requestedAt: Date.now(),
       });
       expect(session.minSegment).toBe(24);
       expect(session.minSubtitleSegment).toBe(5);

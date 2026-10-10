@@ -17,6 +17,8 @@ export const ProgramVersion = sqliteTable(
     createdAt: integer({ mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer({ mode: 'timestamp_ms' }).notNull(),
     duration: integer().notNull(),
+    bitrate: integer(), // Source total, bits/second.
+    container: text(),
     sampleAspectRatio: text(),
     displayAspectRatio: text(),
     frameRate: text(),

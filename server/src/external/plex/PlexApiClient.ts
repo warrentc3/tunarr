@@ -2146,9 +2146,19 @@ export class PlexApiClient extends MediaSourceApiClient<PlexTypes> {
     }
 
     const streams: MediaStream[] = [];
-    if (videoStream) {
+    for (const videoStream of filter(
+      apiMediaStreams,
+      (stream): stream is PlexMediaVideoStream => stream.streamType === 1,
+    )) {
       const videoDetails = {
         streamType: 'video',
+        // Plex uses kilobits/second; normalized and stored rates are bits/second.
+        // The official metadata example's 1428 matches its Part bytes/duration:
+        // https://support.plex.tv/articles/201638786-plex-media-server-url-commands/
+        bitrate:
+          videoStream.bitrate !== undefined
+            ? videoStream.bitrate * 1000
+            : undefined,
         codec: videoStream.codec,
         bitDepth: videoStream.bitDepth ?? 8,
         languageCodeISO6392: videoStream.languageCode,
@@ -2179,7 +2189,10 @@ export class PlexApiClient extends MediaSourceApiClient<PlexTypes> {
         (audioStream) => {
           return {
             streamType: 'audio',
-            // bitrate: audioStream.bitrate,
+            bitrate:
+              audioStream.bitrate !== undefined
+                ? audioStream.bitrate * 1000
+                : undefined,
             channels: audioStream.channels,
             codec: audioStream.codec,
             index: audioStream.index,
@@ -2296,6 +2309,11 @@ export class PlexApiClient extends MediaSourceApiClient<PlexTypes> {
     return Result.success({
       // Handle if this is not present...
       duration: relevantMedia.duration!,
+      bitrate:
+        relevantMedia.bitrate !== undefined
+          ? relevantMedia.bitrate * 1000
+          : undefined,
+      container: relevantMediaPart.container ?? relevantMedia.container,
       sampleAspectRatio: isNonEmptyString(videoStream?.pixelAspectRatio)
         ? videoStream.pixelAspectRatio
         : '1:1',
@@ -2314,6 +2332,13 @@ export class PlexApiClient extends MediaSourceApiClient<PlexTypes> {
           type: 'remote',
           externalKey: relevantMediaPart.key,
           path: relevantMediaPart.file,
+          sizeBytes: relevantMediaPart.size,
+          // A multipart title's duration must not be paired with one part's size.
+          duration:
+            relevantMediaPart.duration ??
+            (relevantMedia.Part.length === 1
+              ? relevantMedia.duration
+              : undefined),
           sourceType: MediaSourceType.Plex,
         },
       ],
@@ -2378,6 +2403,8 @@ function emptyMediaItem(item: PlexTerminalMedia): Maybe<MediaItem> {
   return {
     displayAspectRatio: '',
     duration,
+    bitrate: media.bitrate !== undefined ? media.bitrate * 1000 : undefined,
+    container: part.container ?? media.container,
     sampleAspectRatio: '',
     streams: [],
     resolution: { widthPx: media.width ?? 0, heightPx: media.height ?? 0 },
@@ -2385,6 +2412,10 @@ function emptyMediaItem(item: PlexTerminalMedia): Maybe<MediaItem> {
       {
         externalKey: part.key,
         path: part.file,
+        sizeBytes: part.size,
+        duration:
+          part.duration ??
+          (media.Part.length === 1 ? media.duration : undefined),
         sourceType: MediaSourceType.Plex,
         type: 'remote',
       },

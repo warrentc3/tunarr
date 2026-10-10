@@ -21,6 +21,9 @@ export const ProgramMediaStream = sqliteTable(
     profile: text(), //.notNull(),
     streamKind: text({ enum: MediaStreamKind }).notNull(),
     title: text(),
+    bitrate: integer(), // Reported track rate, bits/second.
+    statisticsBitrate: integer(), // Matroska BPS track tag, bits/second.
+    hasAttachedPicture: integer({ mode: 'boolean' }),
 
     // Audio
     language: text(), // Required?

@@ -23,9 +23,12 @@ import {
   trim,
 } from 'lodash-es';
 import NodeCache from 'node-cache';
+import { execFile } from 'node:child_process';
 import { format } from 'node:util';
+import { z } from 'zod';
 import { attempt, isNonEmptyString, parseIntOrNull } from '../util/index.ts';
 import { FfmpegCapabilities } from './builder/capabilities/FfmpegCapabilities.ts';
+import { bitrateFromSize, positiveBitrate } from '../stream/SourceBitrate.ts';
 
 const CacheKeys = {
   ENCODERS: 'encoders',
@@ -334,6 +337,77 @@ export class FfmpegInfo {
     }
 
     return result.data;
+  }
+
+  /** Only used when scan-time rate facts are unavailable. Never logs credentials. */
+  async probeSourceBitrate(
+    path: string,
+    headers?: Readonly<Record<string, string>>,
+  ) {
+    const headerEntries = Object.entries(headers ?? {});
+    if (
+      headerEntries.some(
+        ([name, value]) =>
+          !/^[!#$%&'*+.^_`|~A-Za-z0-9-]+$/.test(name) || /[\r\n]/.test(value),
+      )
+    )
+      return;
+    const args = [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=bit_rate,size,duration',
+      '-of',
+      'json',
+    ];
+    if (headerEntries.length > 0) {
+      args.push(
+        '-headers',
+        headerEntries.map(([name, value]) => `${name}: ${value}\r\n`).join(''),
+      );
+    }
+    args.push(path);
+    try {
+      const output = await new Promise<string>((resolve, reject) => {
+        execFile(
+          this.ffprobePath,
+          args,
+          {
+            timeout: 5_000,
+            maxBuffer: 1024 * 1024,
+            windowsHide: true,
+            encoding: 'utf8',
+          },
+          (error, stdout) => {
+            if (error !== null) {
+              reject(new Error('Unable to measure source bitrate'));
+              return;
+            }
+            resolve(stdout);
+          },
+        );
+      });
+      const parsed = z
+        .object({
+          format: z.object({
+            bit_rate: z.coerce.number().optional(),
+            size: z.coerce.number().optional(),
+            duration: z.coerce.number().optional(),
+          }),
+        })
+        .safeParse(JSON.parse(output));
+      if (!parsed.success) return;
+      const source = parsed.data.format;
+      return (
+        positiveBitrate(source.bit_rate) ??
+        bitrateFromSize(
+          source.size,
+          source.duration === undefined ? undefined : source.duration * 1000,
+        )
+      );
+    } catch {
+      return;
+    }
   }
 
   private getFfmpegStdout(

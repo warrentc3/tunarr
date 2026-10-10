@@ -4,7 +4,6 @@ import type {
   FfprobeSubtitleStream,
   FfprobeVideoStream,
 } from '@/types/ffmpeg.js';
-import type { Maybe } from '@/types/util.js';
 import dayjs from '@/util/dayjs.js';
 import {
   isNonEmptyArray,
@@ -14,7 +13,7 @@ import {
 import { seq } from '@tunarr/shared/util';
 import type { MediaChapter } from '@tunarr/types';
 import { inject, injectable } from 'inversify';
-import { filter, find, isEmpty, isNull, map, orderBy } from 'lodash-es';
+import { filter, isEmpty, isNull, map, orderBy } from 'lodash-es';
 import type { NonEmptyArray } from 'ts-essentials';
 import { LanguageService } from '../services/LanguageService.ts';
 import { Result } from '../types/result.ts';
@@ -55,17 +54,16 @@ export class FfprobeStreamDetails
       );
     }
 
-    const videoStream = find(
+    const videoStreams = filter(
       probeDetails.streams,
       (stream): stream is FfprobeVideoStream => stream.codec_type === 'video',
     );
 
-    let videoDetails: Maybe<VideoStreamDetails>;
-    if (videoStream) {
+    const videoDetails = videoStreams.map((videoStream) => {
       const displayAspectRatio =
         videoStream.display_aspect_ratio ??
         `${videoStream.coded_width / videoStream.coded_height}`;
-      videoDetails = {
+      return {
         sampleAspectRatio: isNonEmptyString(videoStream?.sample_aspect_ratio)
           ? videoStream.sample_aspect_ratio
           : '1:1',
@@ -88,6 +86,7 @@ export class FfprobeStreamDetails
         pixelFormat: videoStream.pix_fmt,
         bitDepth: videoStream.bits_per_raw_sample,
         bitrate: videoStream.bit_rate,
+        statisticsBitrate: readMatroskaStatisticsBitrate(videoStream.tags),
         codec: videoStream.codec_name,
         profile: videoStream.profile?.toLowerCase(),
         streamIndex: videoStream.index,
@@ -95,9 +94,9 @@ export class FfprobeStreamDetails
         colorRange: videoStream.color_range,
         colorSpace: videoStream.color_space,
         colorTransfer: videoStream.color_transfer,
-        isAttachedPic: false,
+        isAttachedPic: videoStream.disposition?.attached_pic === 1,
       } satisfies VideoStreamDetails;
-    }
+    });
 
     const audioStreamDetails = map(
       filter(
@@ -108,6 +107,7 @@ export class FfprobeStreamDetails
         const lang = audioStream.tags?.['language'];
         return {
           bitrate: audioStream.bit_rate ?? undefined,
+          statisticsBitrate: readMatroskaStatisticsBitrate(audioStream.tags),
           channels: audioStream.channels,
           codec: audioStream.codec_name,
           index: audioStream.index,
@@ -151,7 +151,7 @@ export class FfprobeStreamDetails
 
     return Result.success({
       streamDetails: {
-        videoDetails: videoDetails ? [videoDetails] : undefined,
+        videoDetails: isNonEmptyArray(videoDetails) ? videoDetails : undefined,
         audioDetails: isEmpty(audioStreamDetails)
           ? undefined
           : (audioStreamDetails as NonEmptyArray<AudioStreamDetails>),
@@ -159,6 +159,10 @@ export class FfprobeStreamDetails
           ? subtitleStreamDetails
           : undefined,
         duration: dayjs.duration({ seconds: probeDetails.format.duration }),
+        bitrate: probeDetails.format.bit_rate,
+        sourceSizeBytes: probeDetails.format.size,
+        sourceContainer: probeDetails.format.format_name,
+        sourceFileDurationMs: probeDetails.format.duration * 1000,
         formatTags: probeDetails.format.tags,
         chapters: seq.collect(
           orderBy(probeDetails.chapters, (c) => c.start, 'asc'),
@@ -186,6 +190,24 @@ export class FfprobeStreamDetails
         : new FileStreamSource(path),
     });
   }
+}
+
+// mkvmerge writes BPS in bits/second. ffprobe can expose the default-language
+// tag as BPS or BPS-eng (and other three-letter language suffixes).
+export function readMatroskaStatisticsBitrate(
+  tags: Record<string, string> | undefined,
+): number | undefined {
+  const entries = Object.entries(tags ?? {}).filter(([key]) =>
+    /^BPS(?:-[a-z]{3})?$/i.test(key),
+  );
+  entries.sort(([a], [b]) => a.length - b.length || a.localeCompare(b));
+  for (const [, value] of entries) {
+    const bitrate = Number(value);
+    if (Number.isFinite(bitrate) && bitrate > 0) {
+      return bitrate;
+    }
+  }
+  return undefined;
 }
 
 function extractIsAnamorphic(
